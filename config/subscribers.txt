@@ -1,0 +1,17 @@
+# FlowGate Subscriber Registry
+# Format: IP=PlanName   (Plans: Basic, Standard, Premium, Business)
+# DEFAULT_PLAN applies to any IP not listed below.
+
+DEFAULT_PLAN=Basic
+
+# Premium subscriber — unlimited data
+192.168.1.10=Premium
+
+# Basic subscriber — 1.5 GB/day limit (will be throttled in demo)
+192.168.1.22=Basic
+
+# Standard subscriber — 3 GB/day, carry-forward enabled
+192.168.1.45=Standard
+
+# Business subscriber — 10 GB/day
+192.168.1.99=Business

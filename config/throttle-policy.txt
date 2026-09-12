@@ -1,0 +1,32 @@
+# FlowGate App-Selective Intelligent Throttling (ASIT) Policy
+# ---------------------------------------------------------------
+# Tier bandwidth limits (Kbps). Use -1 for unlimited.
+LIMIT_ESSENTIAL=-1
+LIMIT_STANDARD=256
+LIMIT_ENTERTAINMENT=64
+
+# ---------------------------------------------------------------
+# App → Tier mappings
+# ESSENTIAL: Always full speed (protected during FUP throttling)
+WHATSAPP=ESSENTIAL
+TELEGRAM=ESSENTIAL
+DNS=ESSENTIAL
+
+# STANDARD: Moderate throttle (256 Kbps) during FUP
+GOOGLE=STANDARD
+GITHUB=STANDARD
+MICROSOFT=STANDARD
+AMAZON=STANDARD
+APPLE=STANDARD
+CLOUDFLARE=STANDARD
+ZOOM=STANDARD
+
+# ENTERTAINMENT: Heavy throttle (64 Kbps) during FUP
+YOUTUBE=ENTERTAINMENT
+NETFLIX=ENTERTAINMENT
+INSTAGRAM=ENTERTAINMENT
+FACEBOOK=ENTERTAINMENT
+TWITTER=ENTERTAINMENT
+TIKTOK=ENTERTAINMENT
+SPOTIFY=ENTERTAINMENT
+DISCORD=ENTERTAINMENT
