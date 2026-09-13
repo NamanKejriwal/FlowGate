@@ -70,16 +70,16 @@ class ConnectionHealthAnalyzerTest {
     // ── 1. Empty / null input ─────────────────────────────────────────────────
 
     @Test
-    void null_decisions_returns_healthy() {
+    void null_decisions_returns_idle() {
         DiagnosticReport r = ConnectionHealthAnalyzer.analyse(null, cleanStats());
-        assertEquals(Cause.HEALTHY, r.cause());
-        assertTrue(r.isHealthy());
+        assertEquals(Cause.IDLE, r.cause());
+        assertFalse(r.isHealthy());
     }
 
     @Test
-    void empty_decisions_returns_healthy() {
+    void empty_decisions_returns_idle() {
         DiagnosticReport r = ConnectionHealthAnalyzer.analyse(Collections.emptyList(), cleanStats());
-        assertEquals(Cause.HEALTHY, r.cause());
+        assertEquals(Cause.IDLE, r.cause());
     }
 
     // ── 2. HARD_DROP ──────────────────────────────────────────────────────────

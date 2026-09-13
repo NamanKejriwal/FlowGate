@@ -53,7 +53,7 @@ public final class ConnectionHealthAnalyzer {
                                            DPIStats globalStats) {
 
         if (recentDecisions == null || recentDecisions.isEmpty()) {
-            return DiagnosticReport.healthy("No recent traffic data — subscriber is idle.");
+            return new DiagnosticReport(Cause.IDLE, "No recent traffic data — subscriber is idle.", 0.0, -1L, 0L, 0L, 0L);
         }
 
         // --- Derive aggregates from the decision window ---
@@ -74,7 +74,7 @@ public final class ConnectionHealthAnalyzer {
                     String.format(
                             "Subscriber has exceeded the hard-drop threshold (%.1f%% of quota). "
                           + "%d/%d recent packets were hard-dropped. "
-                          + "Traffic will continue to be dropped until the billing cycle resets.",
+                          + "Traffic remains subject to the hard-drop policy while usage remains above the configured threshold.",
                             usagePct, dropCount, totalDecisions),
                     usagePct,
                     latest.bandwidthLimitKbps(),
@@ -162,7 +162,7 @@ public final class ConnectionHealthAnalyzer {
         // currently exist in this system.
         return DiagnosticReport.healthy(
                 String.format("Subscriber is operating normally (%.1f%% quota used). "
-                            + "No throttling, hard-drop, or congestion detected.", usagePct));
+                            + "No throttling or hard-drop detected.", usagePct));
     }
 
     // ── Private helpers ───────────────────────────────────────────────────────
@@ -195,6 +195,8 @@ public final class ConnectionHealthAnalyzer {
          * expose a genuine network-level congestion signal.
          */
         NETWORK_CONGESTION,
+        /** No recent traffic data. */
+        IDLE,
         /** No issue detected. */
         HEALTHY
     }
