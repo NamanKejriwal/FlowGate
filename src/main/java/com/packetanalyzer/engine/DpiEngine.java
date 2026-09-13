@@ -74,8 +74,8 @@ public class DpiEngine {
         this.config = config;
 
         System.out.println("\n╔══════════════════════════════════════════════════════════════╗");
-        System.out.println("║                    DPI ENGINE v1.4                           ║");
-        System.out.println("║               Deep Packet Inspection System                  ║");
+        System.out.println("║                     FLOWGATE v1.0.0                          ║");
+        System.out.println("║               Subscriber-Aware Policy Engine                 ║");
         System.out.println("╠══════════════════════════════════════════════════════════════╣");
         System.out.println("║ CONFIGURATION                                                ║");
         System.out.println(String.format("║   Load Balancers:                %15d             ║", config.numLoadBalancers));
@@ -459,7 +459,7 @@ public class DpiEngine {
         StringBuilder ss = new StringBuilder();
         
         ss.append("\n╔══════════════════════════════════════════════════════════════╗\n");
-        ss.append("║                    DPI ENGINE STATISTICS                     ║\n");
+        ss.append("║                    FLOWGATE STATISTICS                       ║\n");
         ss.append("╠══════════════════════════════════════════════════════════════╣\n");
         
         ss.append("║ PACKET STATISTICS                                            ║\n");
