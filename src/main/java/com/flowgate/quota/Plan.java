@@ -76,6 +76,17 @@ public final class Plan {
                 .build();
     }
 
+    /** Small deterministic plan for FUP demonstration. */
+    public static Plan demo() {
+        return new Builder("Demo")
+                .dailyQuotaBytes(2000)
+                .throttleThresholdBytes(2000)
+                .hardDropThresholdBytes(4000)
+                .carryForwardEnabled(false)
+                .offPeakHours(0, 0)
+                .build();
+    }
+
     // ── Helpers ──────────────────────────────────────────────────────────────
 
     public boolean isUnlimited() { return dailyQuotaBytes == -1; }

@@ -1,5 +1,7 @@
 package com.packetanalyzer.types;
 
+import com.flowgate.policy.PolicyDecision;
+
 public class PacketJob {
     public int packetId;
     public FiveTuple tuple = new FiveTuple();
@@ -16,6 +18,9 @@ public class PacketJob {
     
     public long tsSec;
     public long tsUsec;
+
+    /** Set by QuotaManager after policy evaluation. Null if FlowGate is disabled. */
+    public PolicyDecision policyDecision;
 
     public void reset() {
         packetId = 0;

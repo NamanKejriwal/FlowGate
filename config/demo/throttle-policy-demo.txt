@@ -1,0 +1,22 @@
+# ---------------------------------------------------------------
+# DEMO Throttle Policy (Aggressively small bandwidth limits)
+# These small limits ensure the small demo PCAP bursts past
+# the Token Bucket capacity immediately.
+#
+# 1 Kbps limit = 125 bytes/sec burst capacity
+# 2 Kbps limit = 250 bytes/sec burst capacity
+# ---------------------------------------------------------------
+
+LIMIT_ESSENTIAL=-1
+LIMIT_STANDARD=2
+LIMIT_ENTERTAINMENT=1
+
+# App Mappings
+TELEGRAM=ESSENTIAL
+DNS=ESSENTIAL
+
+GOOGLE=STANDARD
+GITHUB=STANDARD
+
+YOUTUBE=ENTERTAINMENT
+NETFLIX=ENTERTAINMENT

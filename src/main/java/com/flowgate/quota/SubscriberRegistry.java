@@ -109,6 +109,7 @@ public final class SubscriberRegistry {
             case "standard" -> Plan.standard();
             case "business" -> Plan.business();
             case "basic"    -> Plan.basic();
+            case "demo"     -> Plan.demo();
             default -> {
                 FlowGateLogger.warn(COMPONENT, "Unknown plan '" + name + "' at line " + lineNum + ", defaulting to Basic");
                 yield Plan.basic();
@@ -120,8 +121,11 @@ public final class SubscriberRegistry {
         try {
             byte[] bytes = InetAddress.getByName(ip).getAddress();
             if (bytes.length != 4) return -1;
-            return ((bytes[0] & 0xFF) << 24) | ((bytes[1] & 0xFF) << 16)
-                 | ((bytes[2] & 0xFF) << 8)  |  (bytes[3] & 0xFF);
+            // PacketParser uses Little Endian to mimic x86 C++ memcpy. We must match it.
+            return (bytes[0] & 0xFF) |
+                  ((bytes[1] & 0xFF) << 8) |
+                  ((bytes[2] & 0xFF) << 16) |
+                  ((bytes[3] & 0xFF) << 24);
         } catch (UnknownHostException e) {
             FlowGateLogger.warn(COMPONENT, "Cannot parse IP at line " + lineNum + ": " + ip);
             return -1;

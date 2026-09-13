@@ -1,5 +1,8 @@
 package com.packetanalyzer.engine;
 
+import com.flowgate.policy.PolicyDecision;
+import com.flowgate.policy.PolicyVerdict;
+import com.flowgate.quota.QuotaManager;
 import com.packetanalyzer.extractors.DnsExtractor;
 import com.packetanalyzer.extractors.HttpHostExtractor;
 import com.packetanalyzer.extractors.SniExtractor;
@@ -24,6 +27,7 @@ public class FastPathProcessor implements Runnable {
     private final LinkedBlockingQueue<PacketJob> inputQueue;
     private final ConnectionTracker connTracker;
     private final RuleManager ruleManager;
+    private final QuotaManager quotaManager;   // null if FlowGate disabled
     private final PacketOutputCallback outputCallback;
 
     private final AtomicLong packetsProcessed = new AtomicLong(0);
@@ -40,11 +44,15 @@ public class FastPathProcessor implements Runnable {
     private final long flowTimeoutSec;
     private final long cleanupWindowSec;
 
-    public FastPathProcessor(int fpId, RuleManager ruleManager, DPIStats globalStats, boolean verbose, long flowTimeoutSec, long cleanupWindowSec, PacketOutputCallback outputCallback) {
+    public FastPathProcessor(int fpId, RuleManager ruleManager, QuotaManager quotaManager,
+                             DPIStats globalStats, boolean verbose,
+                             long flowTimeoutSec, long cleanupWindowSec,
+                             PacketOutputCallback outputCallback) {
         this.fpId = fpId;
         this.inputQueue = new LinkedBlockingQueue<>(10000);
-        this.connTracker = new ConnectionTracker(fpId, 50000); // Max connections per FP
+        this.connTracker = new ConnectionTracker(fpId, 50000);
         this.ruleManager = ruleManager;
+        this.quotaManager = quotaManager;
         this.globalStats = globalStats;
         this.verbose = verbose;
         this.flowTimeoutSec = flowTimeoutSec;
@@ -114,13 +122,42 @@ public class FastPathProcessor implements Runnable {
             try {
                 PacketJob job = inputQueue.poll(100, TimeUnit.MILLISECONDS);
                 if (job == null) {
-                    continue; // Timeout sweep removed, relying on PCAP timestamps
+                    continue;
                 }
 
                 packetsProcessed.incrementAndGet();
 
+                // Step 1: DPI — classify the flow and check firewall rules
                 RuleManager.BlockReason reason = processPacket(job);
-                PacketAction action = (reason == null) ? PacketAction.FORWARD : PacketAction.DROP;
+
+                PacketAction action;
+
+                if (reason != null) {
+                    // Firewall rule says DROP
+                    action = PacketAction.DROP;
+                } else if (quotaManager != null) {
+                    // Step 2: FlowGate — evaluate quota and ASIT bandwidth limits
+                    long pcapTsUsec = job.tsSec * 1_000_000L + job.tsUsec;
+
+                    // Look up the appType the DPI engine just classified (may be UNKNOWN)
+                    Connection tracked = connTracker.getOrCreateConnection(job.tuple, job.tsSec);
+                    com.packetanalyzer.types.AppType appType = (tracked != null)
+                            ? tracked.appType
+                            : com.packetanalyzer.types.AppType.UNKNOWN;
+
+                    PolicyDecision decision = quotaManager.evaluate(
+                            job.tuple.srcIp, appType, job.data.length, pcapTsUsec);
+
+                    job.policyDecision = decision;
+
+                    action = switch (decision.verdict()) {
+                        case FORWARD -> PacketAction.FORWARD;
+                        case DELAY   -> PacketAction.DELAY;
+                        case DROP    -> PacketAction.DROP;
+                    };
+                } else {
+                    action = PacketAction.FORWARD;
+                }
 
                 if (outputCallback != null) {
                     outputCallback.onPacketProcessed(job, action, reason);
@@ -133,9 +170,7 @@ public class FastPathProcessor implements Runnable {
                 }
 
             } catch (InterruptedException e) {
-                if (!running.get()) {
-                    break;
-                }
+                if (!running.get()) break;
                 Thread.currentThread().interrupt();
             }
         }

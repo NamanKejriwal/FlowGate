@@ -153,8 +153,10 @@ class QuotaManagerTest {
         assertEquals(1000L, decision.usageBytes());
     }
 
-    // Helper: convert 4 octets to a 32-bit int
+    // ── Helper ───────────────────────────────────────────────────────────────
+    
+    // Little Endian to match x86 memcpy
     private int ipToInt(int a, int b, int c, int d) {
-        return (a << 24) | (b << 16) | (c << 8) | d;
+        return (a & 0xFF) | ((b & 0xFF) << 8) | ((c & 0xFF) << 16) | ((d & 0xFF) << 24);
     }
 }

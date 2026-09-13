@@ -1,5 +1,9 @@
 package com.packetanalyzer.engine;
 
+import com.flowgate.policy.ThrottlePolicy;
+import com.flowgate.quota.QuotaManager;
+import com.flowgate.quota.SubscriberRegistry;
+import com.flowgate.util.FlowGateLogger;
 import com.packetanalyzer.io.PcapReader;
 import com.packetanalyzer.io.PcapWriter;
 import com.packetanalyzer.parser.PacketParser;
@@ -31,10 +35,14 @@ public class DpiEngine {
         public boolean verbose = false;
         public long flowTimeoutSec = 300;
         public long cleanupWindowSec = 10;
+        // FlowGate settings (optional — FlowGate is disabled if subscribersFile is empty)
+        public String subscribersFile   = "";
+        public String throttlePolicyFile = "";
     }
 
     private final Config config;
     private RuleManager ruleManager;
+    private QuotaManager quotaManager;  // null if FlowGate disabled
     private GlobalConnectionTable globalConnTable;
 
     private final List<FastPathProcessor> fastPathProcessors = new ArrayList<>();
@@ -79,6 +87,24 @@ public class DpiEngine {
             System.out.println("╚══════════════════════════════════════════════════════════════╝");
         }
 
+        // Initialize FlowGate QuotaManager (optional — only if subscribers file provided)
+        if (config.subscribersFile != null && !config.subscribersFile.isEmpty()) {
+            try {
+                SubscriberRegistry registry = SubscriberRegistry.loadFromFile(config.subscribersFile);
+                ThrottlePolicy policy = config.throttlePolicyFile != null && !config.throttlePolicyFile.isEmpty()
+                        ? ThrottlePolicy.loadFromFile(config.throttlePolicyFile)
+                        : ThrottlePolicy.defaults();
+                quotaManager = new QuotaManager(registry, policy);
+                FlowGateLogger.info("DpiEngine", "FlowGate policy engine active. " +
+                        registry.getSubscriberCount() + " subscribers loaded.");
+            } catch (Exception e) {
+                System.err.println("[DpiEngine] FlowGate init failed: " + e.getMessage());
+                return false;
+            }
+        } else {
+            FlowGateLogger.info("DpiEngine", "FlowGate disabled (no --subscribers flag). Running as pure DPI.");
+        }
+
         int totalFps = config.numLoadBalancers * config.fpsPerLb;
         globalConnTable = new GlobalConnectionTable(totalFps);
 
@@ -88,7 +114,7 @@ public class DpiEngine {
 
         for (int i = 0; i < totalFps; i++) {
             FastPathProcessor fp = new FastPathProcessor(
-                i, ruleManager, stats, config.verbose, 
+                i, ruleManager, quotaManager, stats, config.verbose, 
                 config.flowTimeoutSec, config.cleanupWindowSec, outputCb
             );
             fastPathProcessors.add(fp);
@@ -301,9 +327,25 @@ public class DpiEngine {
 
     private void handleOutput(PacketJob job, PacketAction action, RuleManager.BlockReason reason) {
         if (action == PacketAction.DROP) {
+            // Check if this was a FlowGate hard-drop vs a rule-based drop
+            if (job.policyDecision != null) {
+                stats.hardDroppedPackets.incrementAndGet();
+            }
             stats.droppedPackets.incrementAndGet();
             return;
         }
+
+        if (action == PacketAction.DELAY && job.policyDecision != null) {
+            // Simulate throttling: shift the output PCAP timestamp forward by the calculated delay.
+            // This makes packet-analysis tools (Wireshark, etc.) "see" the packet
+            // arriving later in simulated time — visually demonstrating the bandwidth limit.
+            long delayUsec = job.policyDecision.simulatedDelayUsec();
+            long newTsUsec = job.tsUsec + delayUsec;
+            job.tsSec  = job.tsSec + (newTsUsec / 1_000_000L);
+            job.tsUsec = newTsUsec % 1_000_000L;
+            stats.throttledPackets.incrementAndGet();
+        }
+
         stats.forwardedPackets.incrementAndGet();
         try {
             outputQueue.put(job);
@@ -372,6 +414,8 @@ public class DpiEngine {
         ss.append("║ FILTERING STATISTICS                                         ║\n");
         ss.append(String.format("║   Forwarded:                     %15d             ║\n", stats.forwardedPackets.get()));
         ss.append(String.format("║   Dropped/Blocked:               %15d             ║\n", stats.droppedPackets.get()));
+        ss.append(String.format("║   Throttled (ASIT DELAY):        %15d             ║\n", stats.throttledPackets.get()));
+        ss.append(String.format("║   Hard-Dropped (Quota 2x):       %15d             ║\n", stats.hardDroppedPackets.get()));
         
         long total = stats.totalPackets.get();
         if (total > 0) {

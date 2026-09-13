@@ -1,0 +1,5 @@
+DEFAULT_PLAN=Basic
+# The main demo subscriber configured with the tiny FUP limits
+192.168.1.100=Demo
+# An untouched baseline user for comparison
+192.168.1.50=Basic
