@@ -1,5 +1,8 @@
 package com.packetanalyzer.engine;
 
+import com.flowgate.diagnostics.ConnectionHealthAnalyzer;
+import com.flowgate.diagnostics.ConnectionHealthAnalyzer.DiagnosticReport;
+import com.flowgate.policy.PolicyDecision;
 import com.flowgate.policy.ThrottlePolicy;
 import com.flowgate.quota.QuotaManager;
 import com.flowgate.quota.SubscriberRegistry;
@@ -20,7 +23,10 @@ import com.packetanalyzer.analytics.AnalyticsManager;
 
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -54,6 +60,15 @@ public class DpiEngine {
 
     private final DPIStats stats = new DPIStats();
     private final AtomicBoolean running = new AtomicBoolean(false);
+
+    /**
+     * Collects the last {@value #MAX_DECISIONS_PER_IP} PolicyDecisions per subscriber IP.
+     * Populated by handleOutput(); consumed by runDiagnostics() after processing completes.
+     * Thread-safe: outer map is ConcurrentHashMap; inner list is synchronized.
+     */
+    private static final int MAX_DECISIONS_PER_IP = 50;
+    private final ConcurrentHashMap<Integer, List<PolicyDecision>> decisionsByIp =
+            new ConcurrentHashMap<>();
 
     public DpiEngine(Config config) {
         this.config = config;
@@ -214,6 +229,9 @@ public class DpiEngine {
 
         System.out.print(generateReport());
         System.out.print(globalConnTable.generateReport());
+        if (quotaManager != null) {
+            runDiagnostics();
+        }
 
         long runtimeMs = System.currentTimeMillis() - startTime;
         AnalyticsManager.exportAll(stats, globalConnTable, ruleManager, inputFile, runtimeMs, config.flowTimeoutSec);
@@ -330,6 +348,7 @@ public class DpiEngine {
             // Check if this was a FlowGate hard-drop vs a rule-based drop
             if (job.policyDecision != null) {
                 stats.hardDroppedPackets.incrementAndGet();
+                collectDecision(job.policyDecision);
             }
             stats.droppedPackets.incrementAndGet();
             return;
@@ -344,6 +363,11 @@ public class DpiEngine {
             job.tsSec  = job.tsSec + (newTsUsec / 1_000_000L);
             job.tsUsec = newTsUsec % 1_000_000L;
             stats.throttledPackets.incrementAndGet();
+            collectDecision(job.policyDecision);
+        }
+
+        if (action == PacketAction.FORWARD && job.policyDecision != null) {
+            collectDecision(job.policyDecision);
         }
 
         stats.forwardedPackets.incrementAndGet();
@@ -370,6 +394,65 @@ public class DpiEngine {
                 e.printStackTrace();
             }
         }
+    }
+
+    /**
+     * Records a PolicyDecision in the per-IP ring buffer (max {@value #MAX_DECISIONS_PER_IP} entries).
+     * Thread-safe because the inner list is synchronised on itself.
+     */
+    private void collectDecision(PolicyDecision decision) {
+        List<PolicyDecision> list = decisionsByIp.computeIfAbsent(
+                decision.subscriberIp(), k -> Collections.synchronizedList(new ArrayList<>()));
+        synchronized (list) {
+            list.add(decision);
+            // Keep only the tail — older decisions are less relevant for diagnostics
+            while (list.size() > MAX_DECISIONS_PER_IP) {
+                list.remove(0);
+            }
+        }
+    }
+
+    /**
+     * Runs the Phase 6 Diagnostic Engine across every subscriber for which decisions were collected.
+     * Prints one {@link DiagnosticReport} per subscriber to stdout.
+     */
+    private void runDiagnostics() {
+        if (decisionsByIp.isEmpty()) return;
+
+        System.out.println("\n╔══════════════════════════════════════════════════════════════╗");
+        System.out.println("║          FLOWGATE DIAGNOSTIC REPORT (Phase 6)                ║");
+        System.out.println("╠══════════════════════════════════════════════════════════════╣");
+
+        for (Map.Entry<Integer, List<PolicyDecision>> entry : decisionsByIp.entrySet()) {
+            List<PolicyDecision> decisions;
+            synchronized (entry.getValue()) {
+                decisions = new ArrayList<>(entry.getValue());
+            }
+            DiagnosticReport report = ConnectionHealthAnalyzer.analyse(decisions, stats);
+
+            // Convert IP int to dotted notation (Little Endian → dotted decimal)
+            int ipInt = entry.getKey();
+            String ipStr = String.format("%d.%d.%d.%d",
+                     ipInt        & 0xFF,
+                    (ipInt >>  8) & 0xFF,
+                    (ipInt >> 16) & 0xFF,
+                    (ipInt >> 24) & 0xFF);
+
+            System.out.printf("║ Subscriber: %-47s ║%n", ipStr);
+            System.out.printf("║   Cause  : %-48s ║%n", report.cause());
+            System.out.printf("║   Usage  : %-47s ║%n", String.format("%.1f%%", report.quotaUsagePct()));
+            System.out.printf("║   Delayed: %-5d  Dropped: %-5d  Sampled: %-14d ║%n",
+                    report.delayedPackets(), report.droppedPackets(), report.sampledPackets());
+            // Word-wrap the message at ~58 chars
+            String msg = report.message();
+            while (msg.length() > 58) {
+                System.out.printf("║   %s ║%n", String.format("%-58s", msg.substring(0, 58)));
+                msg = msg.substring(58);
+            }
+            System.out.printf("║   %-58s ║%n", msg);
+            System.out.println("╠══════════════════════════════════════════════════════════════╣");
+        }
+        System.out.println("╚══════════════════════════════════════════════════════════════╝");
     }
 
     public String generateReport() {
