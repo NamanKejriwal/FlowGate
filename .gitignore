@@ -7,3 +7,11 @@ target/
 .DS_Store
 reports/
 output.pcap
+
+# Local scratch / one-off edit helpers (never commit)
+fix_*.py
+patch_*.py
+patch*.py
+rewrite*.py
+RewriteTool*.java
+*.patch
