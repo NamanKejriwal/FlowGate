@@ -40,8 +40,6 @@ public class LoadBalancer implements Runnable {
         running.set(true);
         thread = new Thread(this, "LB-" + lbId);
         thread.start();
-
-        System.out.println("[LB" + lbId + "] Started (serving FP" + fpStartId + "-FP" + (fpStartId + numFps - 1) + ")");
     }
 
     public void stop() {
@@ -56,8 +54,6 @@ public class LoadBalancer implements Runnable {
                 Thread.currentThread().interrupt();
             }
         }
-
-        System.out.println("[LB" + lbId + "] Stopped");
     }
 
     public LinkedBlockingQueue<PacketJob> getInputQueue() {

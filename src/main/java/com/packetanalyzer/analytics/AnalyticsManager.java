@@ -33,9 +33,8 @@ public class AnalyticsManager {
             CsvExporter.exportTopTalkers(outputDir, collector.getTopTalkers());
             CsvExporter.exportRules(outputDir, ruleManager);
             
-            System.out.println("\n[AnalyticsManager] Reports successfully exported to " + outputDir + "/");
         } catch (IOException e) {
-            System.err.println("\n[AnalyticsManager] ERROR exporting reports: " + e.getMessage());
+            System.err.println("[AnalyticsManager] export failed: " + e.getMessage());
         }
     }
 }

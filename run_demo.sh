@@ -34,9 +34,3 @@ echo ""
 java -jar target/flowgate-1.0.0.jar samples/flowgate-demo.pcap "$OUT_PCAP" \
     --subscribers config/demo/subscribers-demo.txt \
     --throttle-policy config/demo/throttle-policy-demo.txt
-
-echo ""
-echo "=========================================================================="
-echo " Demo Complete."
-echo " Filtered output PCAP saved to: $OUT_PCAP"
-echo "=========================================================================="

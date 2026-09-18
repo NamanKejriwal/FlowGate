@@ -77,16 +77,11 @@ public class GlobalConnectionTable {
         GlobalStats stats = getGlobalStats();
 
         StringBuilder ss = new StringBuilder();
-        ss.append("\n╔══════════════════════════════════════════════════════════════╗\n");
-        ss.append("║               CONNECTION STATISTICS REPORT                    ║\n");
-        ss.append("╠══════════════════════════════════════════════════════════════╣\n");
-
-        ss.append(String.format("║ Active Connections:     %10d                          ║\n", stats.totalActiveConnections));
-        ss.append(String.format("║ Total Connections Seen: %10d                          ║\n", stats.totalConnectionsSeen));
-
-        ss.append("╠══════════════════════════════════════════════════════════════╣\n");
-        ss.append("║                    APPLICATION BREAKDOWN                      ║\n");
-        ss.append("╠══════════════════════════════════════════════════════════════╣\n");
+        ss.append("----------------------------------------------------------------\n");
+        ss.append("APPLICATION BREAKDOWN\n");
+        ss.append("----------------------------------------------------------------\n\n");
+        ss.append(String.format("  %-22s  %8s   %s%n", "Application", "Packets", "Share"));
+        ss.append("  " + "-".repeat(45) + "\n");
 
         long total = stats.appDistribution.values().stream().mapToLong(Long::longValue).sum();
 
@@ -95,26 +90,21 @@ public class GlobalConnectionTable {
 
         for (Map.Entry<AppType, Long> entry : sortedApps) {
             double pct = total > 0 ? (100.0 * entry.getValue() / total) : 0;
-            ss.append(String.format("║ %-20s %10d (%.1f%%)           ║\n", 
-                entry.getKey().getDisplayName(), entry.getValue(), pct));
+            ss.append(String.format("  %-22s  %8d   %.1f%%%n",
+                    entry.getKey().getDisplayName(), entry.getValue(), pct));
         }
 
         if (!stats.topDomains.isEmpty()) {
-            ss.append("╠══════════════════════════════════════════════════════════════╣\n");
-            ss.append("║                      TOP DOMAINS                             ║\n");
-            ss.append("╠══════════════════════════════════════════════════════════════╣\n");
-
+            ss.append("\n  Top Domains\n");
+            ss.append("  " + "-".repeat(45) + "\n");
             for (Map.Entry<String, Long> entry : stats.topDomains) {
                 String domain = entry.getKey();
-                if (domain.length() > 35) {
-                    domain = domain.substring(0, 32) + "...";
-                }
-                ss.append(String.format("║ %-40s %10d           ║\n", domain, entry.getValue()));
+                if (domain.length() > 38) domain = domain.substring(0, 35) + "...";
+                ss.append(String.format("  %-38s  %d%n", domain, entry.getValue()));
             }
         }
 
-        ss.append("╚══════════════════════════════════════════════════════════════╝\n");
-
+        ss.append("\n");
         return ss.toString();
     }
 }

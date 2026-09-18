@@ -3,28 +3,7 @@ package com.flowgate.policy;
 import com.flowgate.quota.Plan;
 import com.packetanalyzer.types.AppType;
 
-/**
- * A complete, structured record of the FlowGate policy engine's decision for a single packet.
- * This is the central observability object — the dashboard, diagnostic engine,
- * and CSV exporters all read from PolicyDecisions.
- *
- * <p>Implemented as a Java record for immutability and zero boilerplate.
- *
- * @param subscriberIp       Source IP of the subscriber (as 32-bit int)
- * @param planName           The subscriber's plan name (e.g. "Basic")
- * @param appType            The detected application type (e.g. YOUTUBE)
- * @param tier               The ASIT tier assigned to this app
- * @param usageBytes         Total bytes used by this subscriber today so far
- * @param quotaBytes         The subscriber's daily quota (-1 if unlimited)
- * @param usagePct           Usage as a percentage of quota (0.0 if unlimited)
- * @param fupState           The current FUP enforcement state
- * @param bandwidthLimitKbps The effective bandwidth limit in Kbps (-1 = unlimited)
- * @param verdict            The final action taken on the packet
- * @param reasonCode         Machine-readable reason for this decision
- * @param explanation        Human-readable explanation for dashboards/logs
- * @param simulatedDelayUsec Microseconds to add to PCAP timestamp when verdict is DELAY (0 otherwise)
- * @param pcapTimestampSec   The PCAP timestamp of the packet that triggered this decision
- */
+/** Immutable record describing FlowGate's decision for a single packet. */
 public record PolicyDecision(
         int          subscriberIp,
         String       planName,

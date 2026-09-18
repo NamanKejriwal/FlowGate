@@ -50,10 +50,6 @@ public class PcapReader {
 
             globalHeader = new GlobalHeader(magicNumber, vMaj, vMin, snaplen, network);
 
-            System.out.println("PCAP version: " + vMaj + "." + vMin);
-            System.out.println("Snaplen: " + snaplen);
-            System.out.println("Link type: " + network);
-
             return true;
         } catch (IOException e) {
             e.printStackTrace();

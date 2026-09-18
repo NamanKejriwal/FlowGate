@@ -153,6 +153,52 @@ class QuotaManagerTest {
         assertEquals(1000L, decision.usageBytes());
     }
 
+    @Test
+    void evaluateInOrder_gpay_protected_while_throttled_in_demo_sequence() throws Exception {
+        SubscriberRegistry registry = SubscriberRegistry.loadFromFile("config/demo/subscribers-demo.txt");
+        ThrottlePolicy policy = ThrottlePolicy.loadFromFile("config/demo/throttle-policy-demo.txt");
+        QuotaManager qm = new QuotaManager(registry, policy);
+        int ip = ipToInt(192, 168, 1, 100);
+        long ts = 1_000_000L;
+
+        // Packets 0–4: 5 × 600B → 3000B usage (THROTTLE window starts at 2000B)
+        AppType[] lead = {
+                AppType.WHATSAPP, AppType.GOOGLE, AppType.NETFLIX, AppType.GMAIL, AppType.SPOTIFY
+        };
+        for (int i = 0; i < lead.length; i++) {
+            qm.evaluateInOrder(i, ip, lead[i], 600, ts + i);
+        }
+
+        // Packet 5: Google Pay at 3600B → still THROTTLE, must be protected
+        PolicyDecision gpay = qm.evaluateInOrder(5, ip, AppType.GPAY, 600, ts + 5);
+        assertEquals(FupState.THROTTLE, gpay.fupState());
+        assertEquals(PolicyVerdict.FORWARD, gpay.verdict());
+        assertEquals(ReasonCode.ESSENTIAL_TRAFFIC_PROTECTED, gpay.reasonCode());
+        assertEquals(3600L, gpay.usageBytes());
+    }
+
+    @Test
+    void evaluateInOrder_accepts_out_of_order_worker_arrival() throws Exception {
+        SubscriberRegistry registry = SubscriberRegistry.loadFromFile("config/demo/subscribers-demo.txt");
+        ThrottlePolicy policy = ThrottlePolicy.loadFromFile("config/demo/throttle-policy-demo.txt");
+        QuotaManager qm = new QuotaManager(registry, policy);
+        int ip = ipToInt(192, 168, 1, 100);
+
+        java.util.concurrent.Future<PolicyDecision>[] futures = new java.util.concurrent.Future[3];
+        try (var pool = java.util.concurrent.Executors.newFixedThreadPool(3)) {
+            // Submit packet 2 first, then 0, then 1 — gate must still apply in order
+            futures[2] = pool.submit(() -> qm.evaluateInOrder(2, ip, AppType.NETFLIX, 600, 3_000L));
+            Thread.sleep(20);
+            futures[0] = pool.submit(() -> qm.evaluateInOrder(0, ip, AppType.WHATSAPP, 600, 1_000L));
+            futures[1] = pool.submit(() -> qm.evaluateInOrder(1, ip, AppType.GOOGLE, 600, 2_000L));
+
+            assertEquals(600L, futures[0].get().usageBytes());
+            assertEquals(1200L, futures[1].get().usageBytes());
+            assertEquals(1800L, futures[2].get().usageBytes());
+            assertEquals(FupState.WARNING, futures[2].get().fupState());
+        }
+    }
+
     // ── Helper ───────────────────────────────────────────────────────────────
     
     // Little Endian to match x86 memcpy

@@ -18,6 +18,9 @@ public class PacketJob {
     
     public long tsSec;
     public long tsUsec;
+    
+    public String classificationSource = "Unknown";
+    public int workerId = -1;
 
     /** Set by QuotaManager after policy evaluation. Null if FlowGate is disabled. */
     public PolicyDecision policyDecision;

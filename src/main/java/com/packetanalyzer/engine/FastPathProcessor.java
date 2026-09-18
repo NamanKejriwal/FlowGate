@@ -66,8 +66,6 @@ public class FastPathProcessor implements Runnable {
         running.set(true);
         thread = new Thread(this, "FP-" + fpId);
         thread.start();
-
-        System.out.println("[FP" + fpId + "] Started");
     }
 
     public void stop() {
@@ -82,8 +80,6 @@ public class FastPathProcessor implements Runnable {
                 Thread.currentThread().interrupt();
             }
         }
-
-        System.out.println("[FP" + fpId + "] Stopped (processed " + packetsProcessed.get() + " packets)");
     }
 
     public LinkedBlockingQueue<PacketJob> getInputQueue() {
@@ -135,8 +131,12 @@ public class FastPathProcessor implements Runnable {
                 if (reason != null) {
                     // Firewall rule says DROP
                     action = PacketAction.DROP;
+                    // Keep FUP packet-order gate moving so other workers do not stall
+                    if (quotaManager != null) {
+                        quotaManager.skipInOrder(job.packetId);
+                    }
                 } else if (quotaManager != null) {
-                    // Step 2: FlowGate — evaluate quota and ASIT bandwidth limits
+                    // Step 2: FlowGate — evaluate quota in PCAP packet order (DPI stays concurrent)
                     long pcapTsUsec = job.tsSec * 1_000_000L + job.tsUsec;
 
                     // Look up the appType the DPI engine just classified (may be UNKNOWN)
@@ -145,8 +145,8 @@ public class FastPathProcessor implements Runnable {
                             ? tracked.appType
                             : com.packetanalyzer.types.AppType.UNKNOWN;
 
-                    PolicyDecision decision = quotaManager.evaluate(
-                            job.tuple.srcIp, appType, job.data.length, pcapTsUsec);
+                    PolicyDecision decision = quotaManager.evaluateInOrder(
+                            job.packetId, job.tuple.srcIp, appType, job.data.length, pcapTsUsec);
 
                     job.policyDecision = decision;
 
@@ -160,6 +160,9 @@ public class FastPathProcessor implements Runnable {
                 }
 
                 if (outputCallback != null) {
+                    job.workerId = this.fpId;
+                    Connection c = connTracker.getConnection(job.tuple);
+                    if (c != null && c.classificationSource != null) job.classificationSource = c.classificationSource;
                     outputCallback.onPacketProcessed(job, action, reason);
                 }
 
@@ -219,6 +222,7 @@ public class FastPathProcessor implements Runnable {
             Optional<String> domain = DnsExtractor.extractQuery(job.data, job.payloadOffset, job.payloadLength);
             if (domain.isPresent()) {
                 connTracker.classifyConnection(conn, AppType.DNS, domain.get(), ConfidenceLevel.MEDIUM);
+                conn.classificationSource = "DNS";
                 return;
             }
         }
@@ -242,6 +246,7 @@ public class FastPathProcessor implements Runnable {
             AppType app = AppType.fromSni(sni);
             ConfidenceLevel conf = (app != AppType.UNKNOWN && app != AppType.HTTPS) ? ConfidenceLevel.HIGH : ConfidenceLevel.MEDIUM;
             connTracker.classifyConnection(conn, app, sni, conf);
+            if (app != AppType.UNKNOWN) conn.classificationSource = "SNI";
 
             if (app != AppType.UNKNOWN && app != AppType.HTTPS) {
                 classificationHits.incrementAndGet();
@@ -261,6 +266,7 @@ public class FastPathProcessor implements Runnable {
             AppType app = AppType.fromSni(host);
             ConfidenceLevel conf = (app != AppType.UNKNOWN && app != AppType.HTTP) ? ConfidenceLevel.HIGH : ConfidenceLevel.MEDIUM;
             connTracker.classifyConnection(conn, app, host, conf);
+            if (app != AppType.UNKNOWN) conn.classificationSource = "HTTP Host";
 
             if (app != AppType.UNKNOWN && app != AppType.HTTP) {
                 classificationHits.incrementAndGet();

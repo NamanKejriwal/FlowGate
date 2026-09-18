@@ -17,6 +17,10 @@ public enum AppType {
     MICROSOFT("Microsoft"),
     APPLE("Apple"),
     WHATSAPP("WhatsApp"),
+    PAYTM("Paytm"),
+    GPAY("Google Pay"),
+    GMAIL("Gmail"),
+    CHROME("Google Chrome"),
     TELEGRAM("Telegram"),
     TIKTOK("TikTok"),
     SPOTIFY("Spotify"),
@@ -51,7 +55,12 @@ public enum AppType {
         
         String lowerSni = sni.toLowerCase();
         
-        if (lowerSni.contains("google") || lowerSni.contains("gstatic") || lowerSni.contains("googleapis")) {
+        // Check more specific google domains first to prevent shadowing
+        if (lowerSni.contains("gpay") || lowerSni.contains("pay.google.com")) {
+            return GPAY;
+        } else if (lowerSni.contains("mail.google.com") || lowerSni.contains("gmail")) {
+            return GMAIL;
+        } else if (lowerSni.contains("google") || lowerSni.contains("gstatic") || lowerSni.contains("googleapis")) {
             return GOOGLE;
         } else if (lowerSni.contains("youtube") || lowerSni.contains("ytimg")) {
             return YOUTUBE;
@@ -69,6 +78,8 @@ public enum AppType {
             return MICROSOFT;
         } else if (lowerSni.contains("apple") || lowerSni.contains("icloud") || lowerSni.contains("mzstatic")) {
             return APPLE;
+        } else if (lowerSni.contains("paytm.com") || lowerSni.contains("paytm.in")) {
+            return PAYTM;
         } else if (lowerSni.contains("whatsapp") || lowerSni.contains("wa.me")) {
             return WHATSAPP;
         } else if (lowerSni.contains("telegram") || lowerSni.contains("t.me")) {

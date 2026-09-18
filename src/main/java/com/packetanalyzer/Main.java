@@ -2,6 +2,7 @@ package com.packetanalyzer;
 
 import com.packetanalyzer.engine.DpiEngine;
 import com.packetanalyzer.engine.DpiEngine.Config;
+import com.flowgate.util.FlowGateLogger;
 
 import java.io.File;
 
@@ -49,18 +50,11 @@ public class Main {
             }
         }
 
-        System.out.println("Starting FlowGate v1.0.0 — Subscriber-Aware Traffic Policy Engine");
-
+        FlowGateLogger.setLevel(FlowGateLogger.Level.WARN);
         DpiEngine engine = new DpiEngine(config);
 
-        long startTime = System.currentTimeMillis();
         boolean success = engine.processFile(inputFile, outputFile);
-        long endTime = System.currentTimeMillis();
-
-        if (success) {
-            double duration = (endTime - startTime) / 1000.0;
-            System.out.println("\nProcessing completed in " + String.format("%.2f", duration) + " seconds.");
-        } else {
+        if (!success) {
             System.err.println("\nProcessing failed.");
             System.exit(1);
         }

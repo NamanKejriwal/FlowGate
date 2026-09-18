@@ -3,23 +3,8 @@ package com.flowgate.shaping;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
- * A thread-safe, lock-free Token Bucket rate limiter, synchronized to PCAP timestamps.
- *
- * <p><b>How it works:</b> The bucket holds a number of "tokens" where each token
- * represents one byte of allowed bandwidth. Tokens are added (refilled) based on
- * how much simulated time has elapsed between packets, using the PCAP timestamp.
- * When a packet arrives, it tries to consume tokens equal to its byte size.
- * If enough tokens exist, the packet is forwarded. If not, it must be delayed or dropped.
- *
- * <p><b>Thread safety:</b> All state is held in {@link AtomicLong} fields.
- * Token consumption uses a Compare-And-Swap (CAS) retry loop, ensuring correctness
- * under concurrent access from multiple FastPathProcessor threads without blocking locks.
- *
- * <p><b>PCAP simulation note:</b> Real network rate limiters use wall-clock time.
- * Since FlowGate processes PCAP files (which may replay faster or slower than real time),
- * all time calculations use the embedded PCAP packet timestamp in microseconds,
- * NOT {@code System.currentTimeMillis()}. This ensures the math is correct regardless
- * of how fast the machine processes the file.
+ * A thread-safe Token Bucket rate limiter synchronized to PCAP timestamps.
+ * Uses atomic CAS operations for concurrent access (not a formal lock-free proof).
  */
 public final class TokenBucket {
 
@@ -72,12 +57,12 @@ public final class TokenBucket {
             long lastRefill   = lastRefillTsUsec.get();
             long currentTokens = tokens.get();
 
-            // Step 1: Refill based on elapsed time
+            // Refill based on elapsed PCAP time
             long elapsedUsec   = Math.max(0, currentTsUsec - lastRefill);
             long tokensToAdd   = (elapsedUsec * bytesPerSecond) / BURST_MULTIPLIER_USEC;
             long refilled      = Math.min(capacityBytes, currentTokens + tokensToAdd);
 
-            // Step 2: Try to consume
+            // Check if packet fits in budget
             long afterConsume  = refilled - packetBytes;
             if (afterConsume < 0) {
                 // Not enough tokens — update timestamp without consuming
@@ -88,7 +73,7 @@ public final class TokenBucket {
                 return false;
             }
 
-            // Step 3: Atomically commit both the refill timestamp and the new token count
+            // Atomically commit state
             if (lastRefillTsUsec.compareAndSet(lastRefill, currentTsUsec)) {
                 if (tokens.compareAndSet(currentTokens, afterConsume)) {
                     return true; // Success

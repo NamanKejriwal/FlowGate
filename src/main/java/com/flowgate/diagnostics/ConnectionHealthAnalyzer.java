@@ -10,29 +10,8 @@ import com.packetanalyzer.types.DPIStats;
 import java.util.List;
 
 /**
- * Evidence-Based Diagnostic Engine for FlowGate.
- *
- * <p>Answers "Why is my internet slow?" by examining the last N {@link PolicyDecision}s
- * for a subscriber and returning a structured {@link DiagnosticReport} that classifies
- * the root cause of any degradation.
- *
- * <p>Root causes in priority order:
- * <ol>
- *   <li>{@link Cause#HARD_DROP}           — subscriber exceeded 2× quota; traffic is being dropped.</li>
- *   <li>{@link Cause#FUP_ENTERTAINMENT}   — throttled, app is ENTERTAINMENT tier (e.g. YouTube).</li>
- *   <li>{@link Cause#FUP_STANDARD}        — throttled, app is STANDARD tier (e.g. GitHub).</li>
- *   <li>{@link Cause#FUP_WARNING}         — quota &gt; 80% but no throttle yet.</li>
- *   <li>{@link Cause#ESSENTIAL_PROTECTED} — essential app forwarded during throttle.</li>
- *   <li>{@link Cause#HEALTHY}             — everything looks fine.</li>
- * </ol>
- *
- * <p>All inputs are validated defensively; a null/empty decision list returns a
- * {@link Cause#HEALTHY} report rather than throwing.
- *
- * <p>Note: {@code globalStats} is accepted for future extension (e.g. real congestion
- * detection via queue-depth telemetry) but is not used in current classification.
- * {@link Cause#NETWORK_CONGESTION} is reserved and documented below but not emitted
- * until a genuine network-level signal is available.
+ * Diagnoses subscriber degradation by analyzing recent policy decisions.
+ * Evaluates decisions against FUP states to return a structured root cause.
  */
 public final class ConnectionHealthAnalyzer {
 
@@ -56,7 +35,7 @@ public final class ConnectionHealthAnalyzer {
             return new DiagnosticReport(Cause.IDLE, "No recent traffic data — subscriber is idle.", 0.0, -1L, 0L, 0L, 0L);
         }
 
-        // --- Derive aggregates from the decision window ---
+        // Aggregate decision window
 
         long totalDecisions    = recentDecisions.size();
         long delayCount        = countVerdict(recentDecisions, PolicyVerdict.DELAY);
@@ -67,7 +46,7 @@ public final class ConnectionHealthAnalyzer {
         FupState fupState      = latest.fupState();
         double usagePct        = latest.usagePct();
 
-        // --- Priority 1: HARD_DROP ---
+        // Check hard drop
         if (fupState == FupState.HARD_DROP || dropCount > 0) {
             return new DiagnosticReport(
                     Cause.HARD_DROP,
@@ -83,7 +62,7 @@ public final class ConnectionHealthAnalyzer {
                     totalDecisions);
         }
 
-        // --- Priority 2: FUP throttle (ENTERTAINMENT or STANDARD tier) ---
+        // Check FUP throttle
         if (fupState == FupState.THROTTLE && delayCount > 0) {
             Tier tier = latest.tier();
 
@@ -120,7 +99,7 @@ public final class ConnectionHealthAnalyzer {
             }
         }
 
-        // --- Priority 3: ESSENTIAL traffic protected during throttle ---
+        // Check protected essential traffic
         if (fupState == FupState.THROTTLE
                 && latest.reasonCode() == ReasonCode.ESSENTIAL_TRAFFIC_PROTECTED) {
             return new DiagnosticReport(
@@ -137,7 +116,7 @@ public final class ConnectionHealthAnalyzer {
                     totalDecisions);
         }
 
-        // --- Priority 4: FUP WARNING (>80% but not yet throttled) ---
+        // Check FUP warning
         if (fupState == FupState.WARNING) {
             return new DiagnosticReport(
                     Cause.FUP_WARNING,
@@ -153,7 +132,7 @@ public final class ConnectionHealthAnalyzer {
                     totalDecisions);
         }
 
-        // --- Priority 5: Healthy ---
+        // Healthy fallback
         // NOTE: A NETWORK_CONGESTION cause was considered here but deferred.
         // DPIStats.throttledPackets and hardDroppedPackets are FlowGate FUP/ASIT policy
         // outcomes — they are not evidence of physical network congestion.

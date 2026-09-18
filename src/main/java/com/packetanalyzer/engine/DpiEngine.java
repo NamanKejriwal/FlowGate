@@ -49,6 +49,7 @@ public class DpiEngine {
     private final Config config;
     private RuleManager ruleManager;
     private QuotaManager quotaManager;  // null if FlowGate disabled
+    private ThrottlePolicy activePolicy;
     private GlobalConnectionTable globalConnTable;
 
     private final List<FastPathProcessor> fastPathProcessors = new ArrayList<>();
@@ -72,34 +73,27 @@ public class DpiEngine {
 
     public DpiEngine(Config config) {
         this.config = config;
-
-        System.out.println("\n╔══════════════════════════════════════════════════════════════╗");
-        System.out.println("║                     FLOWGATE v1.0.0                          ║");
-        System.out.println("║               Subscriber-Aware Policy Engine                 ║");
-        System.out.println("╠══════════════════════════════════════════════════════════════╣");
-        System.out.println("║ CONFIGURATION                                                ║");
-        System.out.println(String.format("║   Load Balancers:                %15d             ║", config.numLoadBalancers));
-        System.out.println(String.format("║   FPs per LB:                    %15d             ║", config.fpsPerLb));
-        System.out.println(String.format("║   Total FP threads:              %15d             ║", config.numLoadBalancers * config.fpsPerLb));
-        System.out.println("╚══════════════════════════════════════════════════════════════╝");
     }
+
+    static class ProcessedRecord {
+        int packetId;
+        com.packetanalyzer.types.FiveTuple tuple;
+        int workerId;
+        com.packetanalyzer.types.AppType app;
+        com.flowgate.policy.ThrottlePolicy.Tier tier;
+        String source;
+        com.flowgate.policy.PolicyVerdict verdict;
+        com.flowgate.policy.ReasonCode reason;
+        com.flowgate.policy.FupState fupState;
+        long usageBytes;
+        double usagePct;
+    }
+    private final java.util.List<ProcessedRecord> processedRecords = java.util.Collections.synchronizedList(new java.util.ArrayList<>());
 
     public boolean initialize() {
         ruleManager = new RuleManager();
         if (config.rulesFile != null && !config.rulesFile.isEmpty()) {
             ruleManager.loadRules(config.rulesFile);
-            
-            RuleManager.RuleStats rstats = ruleManager.getStats();
-            System.out.println("\n╔══════════════════════════════════════════════════════════════╗");
-            System.out.println("║ RULE ENGINE INITIALIZATION                                   ║");
-            System.out.println("╠══════════════════════════════════════════════════════════════╣");
-            String rulesStr = config.rulesFile.length() > 41 ? config.rulesFile.substring(0, 38) + "..." : config.rulesFile;
-            System.out.println("║ Loaded from: " + String.format("%-47s", rulesStr) + " ║");
-            System.out.println(String.format("║   Domains:                       %15d             ║", rstats.blockedDomains));
-            System.out.println(String.format("║   IPs:                           %15d             ║", rstats.blockedIps));
-            System.out.println(String.format("║   Ports:                         %15d             ║", rstats.blockedPorts));
-            System.out.println(String.format("║   Applications:                  %15d             ║", rstats.blockedApps));
-            System.out.println("╚══════════════════════════════════════════════════════════════╝");
         }
 
         // Initialize FlowGate QuotaManager (optional — only if subscribers file provided)
@@ -109,6 +103,7 @@ public class DpiEngine {
                 ThrottlePolicy policy = config.throttlePolicyFile != null && !config.throttlePolicyFile.isEmpty()
                         ? ThrottlePolicy.loadFromFile(config.throttlePolicyFile)
                         : ThrottlePolicy.defaults();
+                activePolicy = policy;
                 quotaManager = new QuotaManager(registry, policy);
                 FlowGateLogger.info("DpiEngine", "FlowGate policy engine active. " +
                         registry.getSubscriberCount() + " subscribers loaded.");
@@ -144,7 +139,6 @@ public class DpiEngine {
             loadBalancers.add(lb);
         }
 
-        System.out.println("[DPIEngine] Initialized successfully");
         return true;
     }
 
@@ -163,7 +157,6 @@ public class DpiEngine {
             lb.start();
         }
 
-        System.out.println("[DPIEngine] All threads started");
     }
 
     public void stop() {
@@ -185,14 +178,10 @@ public class DpiEngine {
                 Thread.currentThread().interrupt();
             }
         }
-
-        System.out.println("[DPIEngine] All threads stopped");
     }
 
     public boolean processFile(String inputFile, String outputFile) {
         long startTime = System.currentTimeMillis();
-        System.out.println("\n[DPIEngine] Processing: " + inputFile);
-        System.out.println("[DPIEngine] Output to:  " + outputFile + "\n");
 
         if (ruleManager == null) {
             if (!initialize()) return false;
@@ -200,7 +189,7 @@ public class DpiEngine {
 
         pcapWriter = new PcapWriter(outputFile);
         if (!pcapWriter.open()) {
-            System.err.println("[DPIEngine] Error: Cannot open output file");
+            System.err.println("[DpiEngine] Error: Cannot open output file");
             return false;
         }
 
@@ -227,14 +216,25 @@ public class DpiEngine {
             pcapWriter.close();
         }
 
-        System.out.print(generateReport());
-        System.out.print(globalConnTable.generateReport());
+        System.out.print(generateReport(inputFile, outputFile));
+        //System.out.print(globalConnTable.generateReport());
         if (quotaManager != null) {
             runDiagnostics();
         }
 
         long runtimeMs = System.currentTimeMillis() - startTime;
         AnalyticsManager.exportAll(stats, globalConnTable, ruleManager, inputFile, runtimeMs, config.flowTimeoutSec);
+
+        System.out.println("\n----------------------------------------------------------------");
+        System.out.println("OUTPUT");
+        System.out.println("----------------------------------------------------------------\n");
+        System.out.printf("  Output PCAP       : %s%n", outputFile);
+        System.out.println("  Analytics         : reports/");
+        System.out.println("  Status            : COMPLETE");
+        System.out.printf("  Processing Time   : %.2f s%n%n", runtimeMs / 1000.0);
+        System.out.println("================================================================");
+        System.out.println("                    FLOWGATE DEMO COMPLETE");
+        System.out.println("================================================================");
 
         return true;
     }
@@ -249,6 +249,8 @@ public class DpiEngine {
         return outputQueue.isEmpty();
     }
 
+    private PcapReader.GlobalHeader globalHeader;
+
     private void readerThreadFunc(String inputFile) {
         PcapReader reader = new PcapReader(inputFile);
         if (!reader.open()) {
@@ -257,7 +259,8 @@ public class DpiEngine {
         }
 
         try {
-            pcapWriter.writeGlobalHeader(reader.getGlobalHeader());
+            globalHeader = reader.getGlobalHeader();
+            pcapWriter.writeGlobalHeader(globalHeader);
         } catch (IOException e) {
             System.err.println("[Reader] Error writing PCAP header");
             return;
@@ -265,8 +268,6 @@ public class DpiEngine {
 
         ParsedPacket parsed = new ParsedPacket();
         int packetId = 0;
-
-        System.out.println("[Reader] Starting packet processing...");
 
         PcapReader.RawPacket raw;
         while ((raw = reader.readNextPacket()) != null) {
@@ -295,7 +296,6 @@ public class DpiEngine {
             }
         }
 
-        System.out.println("[Reader] Finished reading " + packetId + " packets");
         reader.close();
     }
 
@@ -344,6 +344,23 @@ public class DpiEngine {
     }
 
     private void handleOutput(PacketJob job, PacketAction action, RuleManager.BlockReason reason) {
+
+        if (job.policyDecision != null) {
+            ProcessedRecord rec = new ProcessedRecord();
+            rec.packetId = job.packetId;
+            rec.tuple = job.tuple;
+            rec.workerId = job.workerId;
+            rec.app = job.policyDecision.appType();
+            rec.tier = job.policyDecision.tier();
+            rec.source = job.classificationSource;
+            rec.verdict = job.policyDecision.verdict();
+            rec.reason = job.policyDecision.reasonCode();
+            rec.fupState = job.policyDecision.fupState();
+            rec.usageBytes = job.policyDecision.usageBytes();
+            rec.usagePct = job.policyDecision.usagePct();
+            processedRecords.add(rec);
+        }
+
         if (action == PacketAction.DROP) {
             // Check if this was a FlowGate hard-drop vs a rule-based drop
             if (job.policyDecision != null) {
@@ -364,13 +381,13 @@ public class DpiEngine {
             job.tsUsec = newTsUsec % 1_000_000L;
             stats.throttledPackets.incrementAndGet();
             collectDecision(job.policyDecision);
+        } else if (action == PacketAction.FORWARD) {
+            stats.forwardedPackets.incrementAndGet();
+            if (job.policyDecision != null) {
+                collectDecision(job.policyDecision);
+            }
         }
 
-        if (action == PacketAction.FORWARD && job.policyDecision != null) {
-            collectDecision(job.policyDecision);
-        }
-
-        stats.forwardedPackets.incrementAndGet();
         try {
             outputQueue.put(job);
         } catch (InterruptedException e) {
@@ -413,15 +430,14 @@ public class DpiEngine {
     }
 
     /**
-     * Runs the Phase 6 Diagnostic Engine across every subscriber for which decisions were collected.
-     * Prints one {@link DiagnosticReport} per subscriber to stdout.
+     * Runs the diagnostic engine across every subscriber for which policy decisions were collected,
+     * printing a brief per-subscriber health report.
      */
     private void runDiagnostics() {
         if (decisionsByIp.isEmpty()) return;
 
-        System.out.println("\n╔══════════════════════════════════════════════════════════════╗");
-        System.out.println("║          FLOWGATE DIAGNOSTIC REPORT (Phase 6)                ║");
-        System.out.println("╠══════════════════════════════════════════════════════════════╣");
+        System.out.println("DIAGNOSTIC");
+        System.out.println("----------------------------------------------------------------");
 
         for (Map.Entry<Integer, List<PolicyDecision>> entry : decisionsByIp.entrySet()) {
             List<PolicyDecision> decisions;
@@ -430,7 +446,6 @@ public class DpiEngine {
             }
             DiagnosticReport report = ConnectionHealthAnalyzer.analyse(decisions, stats);
 
-            // Convert IP int to dotted notation (Little Endian → dotted decimal)
             int ipInt = entry.getKey();
             String ipStr = String.format("%d.%d.%d.%d",
                      ipInt        & 0xFF,
@@ -438,119 +453,181 @@ public class DpiEngine {
                     (ipInt >> 16) & 0xFF,
                     (ipInt >> 24) & 0xFF);
 
-            System.out.printf("║ Subscriber: %-47s ║%n", ipStr);
-            System.out.printf("║   Cause  : %-48s ║%n", report.cause());
-            System.out.printf("║   Usage  : %-47s ║%n", String.format("%.1f%%", report.quotaUsagePct()));
-            System.out.printf("║   Delayed: %-5d  Dropped: %-5d  Sampled: %-14d ║%n",
+            System.out.printf("  Subscriber      : %s%n", ipStr);
+            System.out.printf("  Cause           : %s%n", report.cause());
+            System.out.printf("  Usage           : %.1f%%%n", report.quotaUsagePct());
+            System.out.printf("  Delayed/Dropped : %d / %d  (sampled: %d)%n",
                     report.delayedPackets(), report.droppedPackets(), report.sampledPackets());
-            // Word-wrap the message at ~58 chars
+            
+            // Format message wrapping
             String msg = report.message();
-            while (msg.length() > 58) {
-                System.out.printf("║   %s ║%n", String.format("%-58s", msg.substring(0, 58)));
-                msg = msg.substring(58);
+            System.out.print("  Explanation     : ");
+            int lineLen = 0;
+            String[] words = msg.split(" ");
+            for (int i = 0; i < words.length; i++) {
+                if (lineLen + words[i].length() > 50 && i > 0) {
+                    System.out.print("\n                    ");
+                    lineLen = 0;
+                }
+                System.out.print(words[i] + " ");
+                lineLen += words[i].length() + 1;
             }
-            System.out.printf("║   %-58s ║%n", msg);
-            System.out.println("╠══════════════════════════════════════════════════════════════╣");
+            System.out.println("\n");
         }
-        System.out.println("╚══════════════════════════════════════════════════════════════╝");
     }
 
-    public String generateReport() {
-        StringBuilder ss = new StringBuilder();
-        
-        ss.append("\n╔══════════════════════════════════════════════════════════════╗\n");
-        ss.append("║                    FLOWGATE STATISTICS                       ║\n");
-        ss.append("╠══════════════════════════════════════════════════════════════╣\n");
-        
-        ss.append("║ PACKET STATISTICS                                            ║\n");
-        ss.append(String.format("║   Total Packets:                 %15d             ║\n", stats.totalPackets.get()));
-        ss.append(String.format("║   Total Bytes:                   %15d             ║\n", stats.totalBytes.get()));
-        ss.append(String.format("║   TCP Packets:                   %15d             ║\n", stats.tcpPackets.get()));
-        ss.append(String.format("║   UDP Packets:                   %15d             ║\n", stats.udpPackets.get()));
-        
-        long lbReceived = 0, lbDispatched = 0;
-        for (LoadBalancer lb : loadBalancers) {
-            LoadBalancer.LBStats lstats = lb.getStats();
-            lbReceived += lstats.packetsReceived;
-            lbDispatched += lstats.packetsDispatched;
-        }
-        
-        long fpProcessed = 0, fpForwarded = 0, fpDropped = 0, activeConnections = 0, evictedConnections = 0;
+    public String generateReport(String inputFile, String outputFile) {
+        long fpProcessed = 0, fpForwarded = 0, fpDropped = 0, activeConnections = 0;
+        StringBuilder workerStats = new StringBuilder();
+        int workerIdx = 0;
         for (FastPathProcessor fp : fastPathProcessors) {
             FastPathProcessor.FPStats fstats = fp.getStats();
             fpProcessed += fstats.packetsProcessed;
             fpForwarded += fstats.packetsForwarded;
             fpDropped += fstats.packetsDropped;
             activeConnections += fstats.connectionsTracked;
-            evictedConnections += fstats.evictedConnections;
+            if (workerIdx > 0) workerStats.append(", ");
+            workerStats.append(String.format("FP-%d (%d pkts)", workerIdx, fstats.packetsProcessed));
+            workerIdx++;
         }
 
-        ss.append("╠══════════════════════════════════════════════════════════════╣\n");
-        ss.append("║ PIPELINE STATISTICS                                          ║\n");
-        ss.append(String.format("║   LB Received:                   %15d             ║\n", lbReceived));
-        ss.append(String.format("║   LB Dispatched:                 %15d             ║\n", lbDispatched));
-        ss.append(String.format("║   FP Processed:                  %15d             ║\n", fpProcessed));
-        ss.append(String.format("║   FP Forwarded:                  %15d             ║\n", fpForwarded));
-        ss.append(String.format("║   FP Dropped:                    %15d             ║\n", fpDropped));
-        
-        ss.append("╠══════════════════════════════════════════════════════════════╣\n");
-        ss.append("║ FILTERING STATISTICS                                         ║\n");
-        ss.append(String.format("║   Forwarded:                     %15d             ║\n", stats.forwardedPackets.get()));
-        ss.append(String.format("║   Dropped/Blocked:               %15d             ║\n", stats.droppedPackets.get()));
-        ss.append(String.format("║   Throttled (ASIT DELAY):        %15d             ║\n", stats.throttledPackets.get()));
-        ss.append(String.format("║   Hard-Dropped (Quota 2x):       %15d             ║\n", stats.hardDroppedPackets.get()));
-        
         long total = stats.totalPackets.get();
-        if (total > 0) {
-            double dropRate = 100.0 * stats.droppedPackets.get() / total;
-            ss.append(String.format("║   Drop Rate:                     %14.2f%%             ║\n", dropRate));
+        long dropped = stats.droppedPackets.get();
+        double dropRate = total > 0 ? 100.0 * dropped / total : 0.0;
+
+        StringBuilder ss = new StringBuilder();
+
+        ss.append("\n================================================================\n");
+        ss.append("                        FLOWGATE  v1.0.0\n");
+        ss.append("             Subscriber-Aware Traffic Policy Engine\n");
+        ss.append("================================================================\n\n");
+
+        ss.append("INITIALIZATION\n");
+        ss.append("----------------------------------------------------------------\n");
+        ss.append(String.format("  Input           : %s%n", inputFile));
+        ss.append(String.format("  Output          : %s%n", outputFile));
+        String subFile = (config.subscribersFile != null && !config.subscribersFile.isEmpty())
+                ? config.subscribersFile : "none (pure DPI mode)";
+        ss.append(String.format("  Subscribers     : %s%n", subFile));
+        ss.append(String.format("  Load Balancers  : %d%n", config.numLoadBalancers));
+        ss.append(String.format("  Fast Paths      : %d%n", config.numLoadBalancers * config.fpsPerLb));
+        ss.append("\n  Policy Tiers\n");
+        if (activePolicy != null) {
+            ss.append("    ESSENTIAL     : unlimited\n");
+            long std = activePolicy.getBandwidthLimitKbps(ThrottlePolicy.Tier.STANDARD);
+            long ent = activePolicy.getBandwidthLimitKbps(ThrottlePolicy.Tier.ENTERTAINMENT);
+            ss.append(String.format("    STANDARD      : %s Kbps (post-FUP)%n", std > 0 ? std + "" : "unlimited"));
+            ss.append(String.format("    ENTERTAINMENT : %s Kbps (post-FUP)%n", ent > 0 ? ent + "" : "unlimited"));
+        } else {
+            ss.append("    ESSENTIAL     : unlimited\n");
+            ss.append("    STANDARD      : 256 Kbps (post-FUP)\n");
+            ss.append("    ENTERTAINMENT : 64 Kbps (post-FUP)\n");
         }
+        ss.append(String.format("  Status          : READY%n%n"));
+
+        ss.append("PROCESSING\n");
+        ss.append("----------------------------------------------------------------\n");
+        if (globalHeader != null) {
+            ss.append(String.format("  PCAP Version    : %d.%d%n", globalHeader.versionMajor(), globalHeader.versionMinor()));
+            ss.append(String.format("  Snaplen         : %d%n", globalHeader.snaplen()));
+            ss.append(String.format("  Link type       : %d%n\n", globalHeader.network()));
+        }
+        ss.append(String.format("  Packets Read    : %d%n", total));
+        ss.append(String.format("  TCP / UDP       : %d / %d%n", stats.tcpPackets.get(), stats.udpPackets.get()));
+        ss.append(String.format("  Flow Affinity   : 5-tuple hashing%n"));
+        ss.append(String.format("  Worker Stats    : %s%n%n", workerStats.toString()));
+
         
-        ss.append("╠══════════════════════════════════════════════════════════════╣\n");
-        ss.append("║ FLOW LIFECYCLE STATISTICS                                    ║\n");
-        ss.append(String.format("║   Active Flows:                  %15d             ║\n", activeConnections));
-        ss.append(String.format("║   Evicted Flows:                 %15d             ║\n", evictedConnections));
-        ss.append(String.format("║   Flow Timeout:                  %11d sec             ║\n", config.flowTimeoutSec));
+        java.util.List<ProcessedRecord> sortedRecs = new java.util.ArrayList<>(processedRecords);
+        sortedRecs.sort(java.util.Comparator.comparingInt(r -> r.packetId));
 
-        if (ruleManager != null) {
-            RuleManager.RuleStats rstats = ruleManager.getStats();
-            long loadedRules = rstats.blockedDomains + rstats.blockedIps + rstats.blockedPorts + rstats.blockedApps;
-            long totalBlockedFlows = stats.blockedByDomain.get() + stats.blockedByIp.get() + stats.blockedByPort.get() + stats.blockedByApp.get();
-            ss.append("╠══════════════════════════════════════════════════════════════╣\n");
-            ss.append("║ RULE STATISTICS                                              ║\n");
-            ss.append(String.format("║   Loaded Rules:                  %15d             ║\n", loadedRules));
-            ss.append(String.format("║   Hit - By Domain:               %15d             ║\n", stats.blockedByDomain.get()));
-            ss.append(String.format("║   Hit - By IP:                   %15d             ║\n", stats.blockedByIp.get()));
-            ss.append(String.format("║   Hit - By Port:                 %15d             ║\n", stats.blockedByPort.get()));
-            ss.append(String.format("║   Hit - By App:                  %15d             ║\n", stats.blockedByApp.get()));
-            ss.append(String.format("║   Total Blocked Flows:           %15d             ║\n", totalBlockedFlows));
+        // Build per-app tier and source map from actual runtime processedRecords
+        java.util.Map<com.packetanalyzer.types.AppType, com.flowgate.policy.ThrottlePolicy.Tier> appTierMap = new java.util.LinkedHashMap<>();
+        java.util.Map<com.packetanalyzer.types.AppType, String> appSourceMap = new java.util.LinkedHashMap<>();
+        java.util.Map<com.packetanalyzer.types.AppType, Long> appCountMap = new java.util.LinkedHashMap<>();
+        for (ProcessedRecord r : sortedRecs) {
+            appTierMap.put(r.app, r.tier);
+            if (r.source != null && !r.source.equals("Unknown")) {
+                appSourceMap.put(r.app, r.source);
+            }
+            appCountMap.merge(r.app, 1L, Long::sum);
+        }
 
-            java.util.Map<String, Long> ruleHits = ruleManager.getRuleHitCounts();
-            if (!ruleHits.isEmpty()) {
-                ss.append("║                                                              ║\n");
-                ss.append("║   Top Triggered Rules:                                       ║\n");
-                List<java.util.Map.Entry<String, Long>> sortedRules = new ArrayList<>(ruleHits.entrySet());
-                sortedRules.sort((a, b) -> b.getValue().compareTo(a.getValue()));
-                int count = 0;
-                for (java.util.Map.Entry<String, Long> entry : sortedRules) {
-                    if (count >= 5) break;
-                    String ruleStr = entry.getKey();
-                    if (ruleStr.length() > 30) {
-                        ruleStr = ruleStr.substring(0, 27) + "...";
-                    }
-                    ss.append(String.format("║     %-30s %15d             ║\n", ruleStr, entry.getValue()));
-                    count++;
+        ss.append("APPLICATION IDENTIFICATION (runtime)\n");
+        ss.append("----------------------------------------------------------------\n");
+        ss.append(String.format("  %-14s  %-7s  %-12s  %s%n", "Application", "Pkts", "Source", "Tier"));
+        ss.append("  " + "-".repeat(56) + "\n");
+        com.packetanalyzer.types.AppType[] sixApps = {
+            com.packetanalyzer.types.AppType.GPAY, com.packetanalyzer.types.AppType.WHATSAPP, 
+            com.packetanalyzer.types.AppType.GOOGLE, com.packetanalyzer.types.AppType.GMAIL, 
+            com.packetanalyzer.types.AppType.NETFLIX, com.packetanalyzer.types.AppType.SPOTIFY};
+        for (com.packetanalyzer.types.AppType a : sixApps) {
+            long cnt = appCountMap.getOrDefault(a, 0L);
+            String tierStr = appTierMap.containsKey(a) ? appTierMap.get(a).name() : "(not seen)";
+            String sourceStr = appSourceMap.getOrDefault(a, "Unknown");
+            ss.append(String.format("  %-14s  %-7d  %-12s  %s%n", a.getDisplayName(), cnt, sourceStr, tierStr));
+        }
+        ss.append("\n");
+
+        ss.append("5-TUPLE -> WORKER AFFINITY\n");
+        ss.append("----------------------------------------------------------------\n");
+        java.util.Map<com.packetanalyzer.types.FiveTuple, java.util.List<ProcessedRecord>> flows = new java.util.LinkedHashMap<>();
+        for (ProcessedRecord r : sortedRecs) flows.computeIfAbsent(r.tuple, k -> new java.util.ArrayList<>()).add(r);
+        
+        for (java.util.Map.Entry<com.packetanalyzer.types.FiveTuple, java.util.List<ProcessedRecord>> e : flows.entrySet()) {
+            if (e.getValue().size() >= 2) {
+                ss.append(String.format("  Flow %s:%d -> %s:%d%n", 
+                        com.packetanalyzer.io.ByteUtils.ipToString(e.getKey().srcIp), e.getKey().srcPort,
+                        com.packetanalyzer.io.ByteUtils.ipToString(e.getKey().dstIp), e.getKey().dstPort));
+                for (ProcessedRecord r : e.getValue()) {
+                    ss.append(String.format("    Packet %d assigned to FP-%d%n", r.packetId + 1, r.workerId));
                 }
+                break; // Only show one example
             }
         }
+        ss.append("\n");
 
-        ss.append("╠══════════════════════════════════════════════════════════════╣\n");
-        ss.append("║ EXPORT STATUS                                                ║\n");
-        ss.append("║   Reports Directory:                 reports/                ║\n");
-        ss.append(String.format("║   CSV Files:                     %15d             ║\n", 5));
-        ss.append(String.format("║   JSON Files:                    %15d             ║\n", 4));
-        ss.append("╚══════════════════════════════════════════════════════════════╝\n");
-        
+        if (quotaManager != null) {
+            ss.append("QUOTA / FUP\n");
+            ss.append("----------------------------------------------------------------\n");
+            ss.append("  Cumulative usage in PCAP packet order (FUP accounting is sequenced).\n");
+            ss.append(String.format("  %-10s  %-16s  %-12s  %s%n", "Pkt", "FUP State", "Usage (B)", "Quota Used"));
+            ss.append("  " + "-".repeat(60) + "\n");
+            for (ProcessedRecord r : sortedRecs) {
+                ss.append(String.format("  %-10d  %-16s  %-12d  %.1f%%%n",
+                        r.packetId + 1, r.fupState, r.usageBytes, r.usagePct));
+            }
+            double finalPct = sortedRecs.isEmpty() ? 0.0 : sortedRecs.get(sortedRecs.size() - 1).usagePct;
+            ss.append(String.format("  Final Usage   : %.1f%%%n\n", finalPct));
+        }
+
+        ss.append("POLICY DECISIONS (runtime)\n");
+        ss.append("----------------------------------------------------------------\n");
+        ss.append("  DPI is concurrent with 5-tuple affinity; FUP quota is applied in\n");
+        ss.append("  PCAP packet order so essential protection is observable.\n");
+        ss.append(String.format("  %-4s %-11s %-13s %-9s %-7s %s%n",
+                "Pkt", "App", "Tier", "FUP", "Verdict", "Reason"));
+        ss.append("  " + "-".repeat(70) + "\n");
+        for (ProcessedRecord r : sortedRecs) {
+            ss.append(String.format("  %-4d %-11s %-13s %-9s %-7s %s%n",
+                    r.packetId + 1,
+                    r.app.getDisplayName(),
+                    r.tier,
+                    r.fupState,
+                    r.verdict,
+                    r.reason));
+        }
+        ss.append("\n");
+
+        ss.append("POLICY RESULTS\n");
+        ss.append("----------------------------------------------------------------\n");
+        ss.append(String.format("  FORWARD         : %d%n", stats.forwardedPackets.get()));
+        ss.append(String.format("  DELAY           : %d%n", stats.throttledPackets.get()));
+        ss.append(String.format("  DROP            : %d%n", stats.hardDroppedPackets.get()));
+        ss.append(String.format("  Packet Drop Rate: %.2f%%%n%n", dropRate));
+
+
+
         return ss.toString();
     }
 }

@@ -5,6 +5,7 @@ public class Connection {
     public ConnectionState state = ConnectionState.NEW;
     public AppType appType = AppType.UNKNOWN;
     public String sni = "";
+    public String classificationSource = "Unknown";
     
     public long packetsIn;
     public long packetsOut;
