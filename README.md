@@ -11,6 +11,8 @@ It processes offline packet captures to identify network applications and subscr
 
 FlowGate is designed to be an understandable prototype for developers who know Java, focusing on observable policy enforcement.
 
+**Built on an open-source engine.** The packet-inspection base (the `com.packetanalyzer` packages: PCAP reading, packet parsing, app identification from DNS / HTTP Host / TLS SNI, and the multi-threaded worker pipeline) follows the design of the widely shared open-source *Packet Analyzer / DPI Engine* project, originally written in C++. FlowGate adds the subscriber layer on top (the `com.flowgate` packages): quota tracking, the FUP state machine, app tiers, token-bucket shaping, explainable decisions and diagnostics.
+
 ---
 
 ## Problem Statement
@@ -40,7 +42,8 @@ Entertainment traffic (e.g., Netflix, Spotify) is throttled more aggressively
 *   **Subscriber-aware quota tracking** (with support for Off-Peak hours)
 *   **FUP state machine** (Normal, Warning, Throttle, Hard-Drop)
 *   **ASIT application tiers** (Essential, Standard, Entertainment)
-*   **CAS-based Token Bucket / atomic state updates** for rate limiting
+*   **Token-bucket traffic shaping** with a bounded queue: packets wait up to 500 ms, then excess traffic is dropped, so output never exceeds the tier's speed limit
+*   **Uploads and downloads billed to the subscriber**: both directions of a connection go to the same worker, so a reply inherits the app found on its request
 *   **`FORWARD` / `DELAY` / `DROP`** policy enforcement
 *   **PCAP timestamp-based delay simulation**
 *   **Explainable `PolicyDecision` + `ReasonCode`** for packets evaluated by FlowGate
@@ -72,7 +75,7 @@ flowchart TD
     K --> P[Diagnostics / Statistics]
 ```
 
-Packets are read from an offline PCAP file and load-balanced to worker threads (`FastPathProcessor`) using a 5-tuple hash to provide flow affinity. Workers classify applications in parallel (SNI, HTTP Host, or DNS where applicable). Shared subscriber FUP/quota evaluation is then applied in PCAP `packetId` order so cumulative usage and policy states stay deterministic. The `QuotaManager` resolves FUP state and ASIT tier, applies the Token Bucket when throttling, and produces a `PolicyDecision` (`FORWARD` / `DELAY` / `DROP`).
+Packets are read from an offline PCAP file and load-balanced to worker threads (`FastPathProcessor`) using a direction-independent 5-tuple hash, so a request and its reply land on the same worker. Workers classify applications in parallel (SNI, HTTP Host, or DNS where applicable). Shared subscriber FUP/quota evaluation is then applied in PCAP `packetId` order so cumulative usage and policy states stay deterministic. The `QuotaManager` resolves FUP state and ASIT tier, applies the Token Bucket when throttling, and produces a `PolicyDecision` (`FORWARD` / `DELAY` / `DROP`).
 
 ---
 
@@ -81,15 +84,15 @@ Packets are read from an offline PCAP file and load-balanced to worker threads (
 For packets evaluated, FlowGate follows this flow:
 
 1. Read packet from PCAP.
-2. Distribute it to a processing worker (`FastPathProcessor`) based on a 5-tuple hash.
+2. Distribute it to a processing worker (`FastPathProcessor`) based on a 5-tuple hash that is the same in both directions.
 3. Parse and classify the packet (tracking TCP state and extracting SNI/DNS/Host metadata). Classification may run concurrently across workers.
-4. Identify the subscriber's IP and resolve their active plan.
+4. Identify the subscriber (the source for uploads, the destination for downloads) and resolve their active plan.
 5. Evaluate shared quota/FUP in PCAP packet order (usage accumulates in capture sequence unless off-peak; DPI workers may still run in parallel).
 6. Determine the current FUP state (`NORMAL`, `WARNING`, `THROTTLE`, `HARD_DROP`).
 7. Determine the application's ASIT tier (`ESSENTIAL`, `STANDARD`, `ENTERTAINMENT`).
-8. Apply Token Bucket rate limiting if the subscriber is throttled (non-essential traffic).
+8. Apply token-bucket shaping if the subscriber is throttled (non-essential traffic): send now, delay, or drop if the queue is full.
 9. Produce a structured `PolicyDecision`.
-10. Execute the verdict: `FORWARD` (pass normally), `DELAY` (shift the output PCAP timestamp; no thread sleep), or `DROP` (exclude from output).
+10. Execute the verdict: `FORWARD` (pass normally), `DELAY` (shift the output PCAP timestamp; no thread sleep), or `DROP` (exclude from output; either the 2x-quota hard limit or a full throttle queue).
 11. Update system statistics and retain the decision for the diagnostic engine.
 12. Write the output packet to the new PCAP (if not dropped).
 
@@ -128,17 +131,20 @@ These tiers are intended to keep designated essential traffic protected from ASI
 
 ## Token Bucket
 
-FlowGate implements throttling using a CAS-based Token Bucket with atomic state updates. 
+Throttling uses one token bucket per subscriber and tier (`TokenBucket`). Think of a jar of byte-tokens that refills at the tier's speed and holds one second's worth:
 
-*   Tokens represent the available transmission budget (in bytes).
-*   Tokens are replenished according to elapsed PCAP time and the configured bandwidth rate.
-*   Each packet consumes tokens equal to its size.
-*   If insufficient tokens exist, the packet receives a `DELAY` verdict (simulated by advancing the output PCAP timestamp, not by sleeping the worker thread).
-*   The bucket's capacity allows for short bursts of traffic.
+*   Each packet pays tokens equal to its size.
+*   **Enough tokens:** the packet is sent now (`FORWARD`).
+*   **Not enough:** the packet still pays, so the balance goes negative (bytes waiting in the queue). It is delayed until the bucket earns that debt back (`DELAY`). Because waiting packets pay up front, the next packet queues behind them.
+*   **Wait would exceed the queue limit** (`MAX_QUEUE_DELAY_MS`, default 500 ms): the packet is dropped and its tokens are refunded (`DROP` with `THROTTLE_QUEUE_FULL`).
 
-**FlowGate uses PCAP timestamps for time simulation**, not wall-clock time, so rate math does not depend on how fast the machine processes the file.
+Result, checked in `TokenBucketTest`: a 1 Mbps stream throttled to 64 Kbps comes out at 64 Kbps (within 2%), no packet waits more than 500 ms, and traffic already under the limit is never delayed.
 
-*Note: In the deterministic demo configuration, bandwidth limits are configured to artificially tiny values (e.g., 1 Kbps, 2 Kbps). This ensures that the small test PCAP instantly depletes the Token Bucket to demonstrate throttling behavior.*
+**FlowGate uses PCAP timestamps for time simulation**, not wall-clock time, so rate math does not depend on how fast the machine processes the file. Tokens are stored in micro-bytes so that frequent packets with tiny gaps still refill the bucket correctly.
+
+The bucket is not thread-safe and does not need to be: `QuotaManager` evaluates one packet at a time in capture order.
+
+*Note: the demo configuration uses tiny limits (1–2 Kbps) so a 7-packet capture shows throttling, and a 5-second queue limit so those packets show as `DELAY` rather than `DROP`.*
 
 ---
 
@@ -151,8 +157,8 @@ Packets evaluated by the policy engine result in a comprehensive `PolicyDecision
 *   The final **Verdict**:
     *   `FORWARD`: Packet is written to output.
     *   `DELAY`: Packet is written to output with a simulated delay added to its PCAP timestamp.
-    *   `DROP`: Packet is discarded.
-*   A **ReasonCode**: A machine-readable explanation (e.g., `FUP_QUOTA_EXCEEDED`, `HARD_DROP_THRESHOLD`, `ESSENTIAL_TRAFFIC_PROTECTED`).
+    *   `DROP`: Packet is discarded, either because usage passed the hard-drop limit or because the throttle queue was full.
+*   A **ReasonCode**: A machine-readable explanation (e.g., `FUP_QUOTA_EXCEEDED`, `THROTTLE_QUEUE_FULL`, `HARD_DROP_THRESHOLD`, `ESSENTIAL_TRAFFIC_PROTECTED`).
 
 By generating a structured decision record, the system can transparently explain not only *what* it did, but *why* it did it.
 
@@ -164,7 +170,7 @@ The `ConnectionHealthAnalyzer` acts as an evidence-based diagnostic engine. By l
 
 Supported diagnoses:
 *   `HARD_DROP`: The subscriber's traffic is being dropped due to exceeding the hard-drop threshold.
-*   `FUP_ENTERTAINMENT` / `FUP_STANDARD`: The subscriber is experiencing slow speeds because their quota is exhausted and the application is being actively throttled based on its tier.
+*   `FUP_ENTERTAINMENT` / `FUP_STANDARD`: The subscriber is experiencing slow speeds because their quota is exhausted and the application is being actively throttled based on its tier. Packets dropped because the throttle queue was full are reported here, not as a hard drop.
 *   `ESSENTIAL_PROTECTED`: The subscriber is throttled, but this specific essential application is being forwarded successfully.
 *   `FUP_WARNING`: The subscriber is approaching their quota limit but is not yet throttled.
 *   `IDLE`: No recent traffic data for the subscriber.
@@ -258,9 +264,11 @@ DPI stays multi-worker with 5-tuple affinity; shared FUP evaluation is ordered b
 
 ## Test Strategy
 
-FlowGate includes **53** automated JUnit tests in `src/test/java/`, focusing on core logic correctness:
-*   `TokenBucketTest`: Verifies Token Bucket rate-limiting behavior, including PCAP-time refill and concurrent consumption.
-*   `QuotaManagerTest`: Ensures FUP state transitions and tier routing function correctly.
+FlowGate includes **64** automated JUnit tests in `src/test/java/`, focusing on core logic correctness:
+*   `TokenBucketTest`: Verifies shaping: delays add up behind each other, the queue limit drops and refunds, PCAP-time refill, and that a 1 Mbps input comes out at the 64 Kbps limit.
+*   `QuotaManagerTest`: Ensures FUP state transitions, tier routing, queue-full drops and upload/download billing work correctly.
+*   `DownloadBillingTest`: End to end on a generated capture: replies from servers are billed to the subscriber and tagged with the app of their request.
+*   `FiveTupleTest`: The flow hash is identical for both directions of a connection.
 *   `SubscriberRegistryTest`: Validates file parsing and plan assignment.
 *   `ThrottlePolicyTest`: Validates ASIT configurations.
 *   `ConnectionHealthAnalyzerTest`: Tests the diagnostic engine's priority logic.
@@ -277,10 +285,11 @@ FlowGate includes **53** automated JUnit tests in `src/test/java/`, focusing on 
 
 ## Design Decisions
 
-*   **Five-Tuple Hashing:** Load balancers distribute packets based on Source IP, Dest IP, Source Port, Dest Port, and Protocol so packets in the same flow stay on the same FastPath worker.
+*   **Five-Tuple Hashing:** Load balancers distribute packets based on Source IP, Dest IP, Source Port, Dest Port, and Protocol. The hash is direction-independent, so both directions of a connection stay on the same FastPath worker and a reply can use the app identified on its request.
+*   **Billing Direction:** The subscriber is whichever end of the packet is listed in the subscribers file: the source for uploads, the destination for downloads.
 *   **Parallel DPI, Ordered FUP:** Classification can run on multiple workers; shared subscriber quota/FUP updates run in PCAP packet order for deterministic policy outcomes.
 *   **Application Tiers (ASIT):** Distinct limits keep designated essential traffic protected from ASIT throttling during FUP enforcement.
-*   **Token Bucket:** Models bandwidth limits with short bursts using CAS/`AtomicLong` state updates driven by PCAP time (not a formal lock-free claim).
+*   **Token Bucket with a bounded queue:** Waiting packets pay for their bytes up front, so delays stack correctly and output cannot exceed the limit; anything that would wait longer than the queue limit is dropped, like a full buffer on a real link.
 *   **Structured Decisions:** A `PolicyDecision` record supports analytics, debugging, and diagnostics beyond a silent drop.
 *   **PCAP Timestamps:** Token Bucket refill and DELAY simulation use the packet timestamp rather than `System.currentTimeMillis()`.
 *   **Offline PCAP Processing:** Allows local development and demos without a live network interface.
@@ -297,6 +306,14 @@ FlowGate is explicitly designed as a prototype and simulation.
 *   **Artificial Demo Limits:** The quotas and bandwidth limits in the demo configuration are intentionally microscopic to force throttling observable within a few packets.
 *   **Ordered FUP Accounting:** FastPath DPI stays concurrent, but `QuotaManager` applies usage/FUP updates in PCAP packet order so state transitions and essential protection are deterministic.
 *   **No Genuine Congestion Telemetry:** FlowGate does not measure physical network packet loss or queue depths.
+
+**Known gaps** (deliberately left simple):
+*   Off-peak hours are computed from the PCAP timestamp in UTC, with no timezone setting.
+*   The "daily" quota does not reset at midnight; usage accumulates across the whole capture.
+*   An off-peak window that crosses midnight (e.g. 23:00–05:00) is not supported.
+*   If neither end of a packet is a listed subscriber, the source IP is billed under the default plan.
+*   Dropped packets still count towards usage (usage is added before the verdict).
+*   If a worker thread failed mid-run, the ordered quota step would wait for its packet indefinitely (no timeout).
 
 ---
 
