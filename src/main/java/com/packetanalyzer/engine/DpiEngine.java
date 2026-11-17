@@ -3,6 +3,7 @@ package com.packetanalyzer.engine;
 import com.flowgate.diagnostics.ConnectionHealthAnalyzer;
 import com.flowgate.diagnostics.ConnectionHealthAnalyzer.DiagnosticReport;
 import com.flowgate.policy.PolicyDecision;
+import com.flowgate.policy.ReasonCode;
 import com.flowgate.policy.ThrottlePolicy;
 import com.flowgate.quota.QuotaManager;
 import com.flowgate.quota.SubscriberRegistry;
@@ -24,6 +25,7 @@ import com.packetanalyzer.analytics.AnalyticsManager;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
@@ -300,7 +302,8 @@ public class DpiEngine {
     }
 
     private int selectLB(FiveTuple tuple) {
-        long hash = tuple.hashCode() & 0xFFFFFFFFL;
+        // Same value for both directions, so a reply goes where its request went
+        long hash = tuple.flowHash() & 0xFFFFFFFFL;
         return (int) (hash % loadBalancers.size());
     }
 
@@ -362,9 +365,14 @@ public class DpiEngine {
         }
 
         if (action == PacketAction.DROP) {
-            // Check if this was a FlowGate hard-drop vs a rule-based drop
+            // A FlowGate drop is either the 2x-quota hard limit or a full throttle queue.
+            // (No policy decision means a firewall rule dropped it.)
             if (job.policyDecision != null) {
-                stats.hardDroppedPackets.incrementAndGet();
+                if (job.policyDecision.reasonCode() == ReasonCode.THROTTLE_QUEUE_FULL) {
+                    stats.throttleQueueDrops.incrementAndGet();
+                } else {
+                    stats.hardDroppedPackets.incrementAndGet();
+                }
                 collectDecision(job.policyDecision);
             }
             stats.droppedPackets.incrementAndGet();
@@ -417,6 +425,17 @@ public class DpiEngine {
      * Records a PolicyDecision in the per-IP ring buffer (max {@value #MAX_DECISIONS_PER_IP} entries).
      * Thread-safe because the inner list is synchronised on itself.
      */
+    /** Recent policy decisions per billed subscriber IP (a copy, for reports and tests). */
+    public Map<Integer, List<PolicyDecision>> getRecentDecisions() {
+        Map<Integer, List<PolicyDecision>> copy = new HashMap<>();
+        decisionsByIp.forEach((ip, list) -> {
+            synchronized (list) {
+                copy.put(ip, List.copyOf(list));
+            }
+        });
+        return copy;
+    }
+
     private void collectDecision(PolicyDecision decision) {
         List<PolicyDecision> list = decisionsByIp.computeIfAbsent(
                 decision.subscriberIp(), k -> Collections.synchronizedList(new ArrayList<>()));
@@ -623,7 +642,8 @@ public class DpiEngine {
         ss.append("----------------------------------------------------------------\n");
         ss.append(String.format("  FORWARD         : %d%n", stats.forwardedPackets.get()));
         ss.append(String.format("  DELAY           : %d%n", stats.throttledPackets.get()));
-        ss.append(String.format("  DROP            : %d%n", stats.hardDroppedPackets.get()));
+        ss.append(String.format("  DROP (2x quota) : %d%n", stats.hardDroppedPackets.get()));
+        ss.append(String.format("  DROP (queue full): %d%n", stats.throttleQueueDrops.get()));
         ss.append(String.format("  Packet Drop Rate: %.2f%%%n%n", dropRate));
 
 

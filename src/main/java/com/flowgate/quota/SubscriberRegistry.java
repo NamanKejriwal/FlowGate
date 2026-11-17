@@ -97,6 +97,11 @@ public final class SubscriberRegistry {
         return planByIp.getOrDefault(ipInt, defaultPlan);
     }
 
+    /** True if this IP is listed in the subscribers file (not just covered by the default plan). */
+    public boolean isSubscriber(int ipInt) {
+        return planByIp.containsKey(ipInt);
+    }
+
     public Plan getDefaultPlan()         { return defaultPlan; }
     public int getSubscriberCount()      { return planByIp.size(); }
     public Set<Integer> getAllIps()       { return planByIp.keySet(); }

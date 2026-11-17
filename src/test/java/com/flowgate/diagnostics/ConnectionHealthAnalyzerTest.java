@@ -211,6 +211,23 @@ class ConnectionHealthAnalyzerTest {
         assertEquals(Cause.HARD_DROP, r.cause());
     }
 
+    @Test
+    void queue_full_drops_are_reported_as_throttling_not_hard_drop() {
+        PolicyDecision delayDecision = delay(FupState.THROTTLE, AppType.YOUTUBE,
+                                             ThrottlePolicy.Tier.ENTERTAINMENT,
+                                             110.0, 2200, 2000, 64L, 500_000L);
+        PolicyDecision queueFull = PolicyDecision.throttleDrop(
+                DEMO_IP, "Demo", AppType.YOUTUBE, ThrottlePolicy.Tier.ENTERTAINMENT,
+                2300, 2000, 115.0, 64L, "test", System.currentTimeMillis() / 1000L);
+
+        DiagnosticReport r = ConnectionHealthAnalyzer.analyse(
+                List.of(delayDecision, queueFull), cleanStats());
+
+        assertEquals(Cause.FUP_ENTERTAINMENT, r.cause());
+        assertEquals(1L, r.droppedPackets());
+        assertTrue(r.message().contains("1 were dropped because the throttle queue was full"));
+    }
+
     // ── 10. DiagnosticReport helpers ─────────────────────────────────────────
 
     @Test

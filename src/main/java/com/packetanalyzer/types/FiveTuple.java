@@ -21,6 +21,17 @@ public class FiveTuple {
         return new FiveTuple(dstIp, srcIp, dstPort, srcPort, protocol);
     }
 
+    /**
+     * Hash that is the same for both directions of a connection (A→B and B→A).
+     * The load balancers use it so a request and its reply reach the same worker,
+     * which lets the reply look up the app that was found on the request.
+     * (Plain {@link #hashCode()} stays direction-specific because it is a map key.)
+     */
+    public int flowHash() {
+        boolean srcFirst = srcIp < dstIp || (srcIp == dstIp && srcPort <= dstPort);
+        return srcFirst ? hashCode() : reverse().hashCode();
+    }
+
     @Override
     public boolean equals(Object o) {
         if (this == o) return true;

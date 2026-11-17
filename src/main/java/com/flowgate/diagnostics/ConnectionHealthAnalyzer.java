@@ -40,6 +40,9 @@ public final class ConnectionHealthAnalyzer {
         long totalDecisions    = recentDecisions.size();
         long delayCount        = countVerdict(recentDecisions, PolicyVerdict.DELAY);
         long dropCount         = countVerdict(recentDecisions, PolicyVerdict.DROP);
+        // A DROP can mean two different things, so tell them apart by reason code:
+        long hardDropCount     = countReason(recentDecisions, ReasonCode.HARD_DROP_THRESHOLD);
+        long queueFullCount    = countReason(recentDecisions, ReasonCode.THROTTLE_QUEUE_FULL);
 
         // Use the most recent decision as the authoritative quota/state snapshot
         PolicyDecision latest  = recentDecisions.get(recentDecisions.size() - 1);
@@ -47,14 +50,14 @@ public final class ConnectionHealthAnalyzer {
         double usagePct        = latest.usagePct();
 
         // Check hard drop
-        if (fupState == FupState.HARD_DROP || dropCount > 0) {
+        if (fupState == FupState.HARD_DROP || hardDropCount > 0) {
             return new DiagnosticReport(
                     Cause.HARD_DROP,
                     String.format(
                             "Subscriber has exceeded the hard-drop threshold (%.1f%% of quota). "
                           + "%d/%d recent packets were hard-dropped. "
                           + "Traffic remains subject to the hard-drop policy while usage remains above the configured threshold.",
-                            usagePct, dropCount, totalDecisions),
+                            usagePct, hardDropCount, totalDecisions),
                     usagePct,
                     latest.bandwidthLimitKbps(),
                     delayCount,
@@ -63,7 +66,7 @@ public final class ConnectionHealthAnalyzer {
         }
 
         // Check FUP throttle
-        if (fupState == FupState.THROTTLE && delayCount > 0) {
+        if (fupState == FupState.THROTTLE && (delayCount > 0 || queueFullCount > 0)) {
             Tier tier = latest.tier();
 
             if (tier == Tier.ENTERTAINMENT) {
@@ -72,9 +75,10 @@ public final class ConnectionHealthAnalyzer {
                         String.format(
                                 "FUP quota exceeded (%.1f%%). App '%s' is in the ENTERTAINMENT tier "
                               + "and is being throttled to %d Kbps. "
-                              + "%d/%d recent packets received a DELAY verdict.",
+                              + "%d/%d recent packets received a DELAY verdict and %d were dropped "
+                              + "because the throttle queue was full.",
                                 usagePct, latest.appType().getDisplayName(),
-                                latest.bandwidthLimitKbps(), delayCount, totalDecisions),
+                                latest.bandwidthLimitKbps(), delayCount, totalDecisions, queueFullCount),
                         usagePct,
                         latest.bandwidthLimitKbps(),
                         delayCount,
@@ -88,9 +92,10 @@ public final class ConnectionHealthAnalyzer {
                         String.format(
                                 "FUP quota exceeded (%.1f%%). App '%s' is in the STANDARD tier "
                               + "and is being throttled to %d Kbps. "
-                              + "%d/%d recent packets received a DELAY verdict.",
+                              + "%d/%d recent packets received a DELAY verdict and %d were dropped "
+                              + "because the throttle queue was full.",
                                 usagePct, latest.appType().getDisplayName(),
-                                latest.bandwidthLimitKbps(), delayCount, totalDecisions),
+                                latest.bandwidthLimitKbps(), delayCount, totalDecisions, queueFullCount),
                         usagePct,
                         latest.bandwidthLimitKbps(),
                         delayCount,
@@ -145,6 +150,12 @@ public final class ConnectionHealthAnalyzer {
     }
 
     // ── Private helpers ───────────────────────────────────────────────────────
+
+    private static long countReason(List<PolicyDecision> decisions, ReasonCode reason) {
+        return decisions.stream()
+                .filter(d -> d.reasonCode() == reason)
+                .count();
+    }
 
     private static long countVerdict(List<PolicyDecision> decisions, PolicyVerdict verdict) {
         return decisions.stream()

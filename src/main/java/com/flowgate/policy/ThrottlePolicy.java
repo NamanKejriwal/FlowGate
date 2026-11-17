@@ -23,6 +23,9 @@ import java.util.Map;
  *   LIMIT_STANDARD=256
  *   LIMIT_ENTERTAINMENT=64
  *
+ *   # Longest a throttled packet may wait before it is dropped (default 500 ms)
+ *   MAX_QUEUE_DELAY_MS=500
+ *
  *   # App → Tier mappings
  *   WHATSAPP=ESSENTIAL
  *   YOUTUBE=ENTERTAINMENT
@@ -57,15 +60,21 @@ public final class ThrottlePolicy {
     private final long essentialLimitKbps;     // -1 = unlimited
     private final long standardLimitKbps;
     private final long entertainmentLimitKbps;
+    private final long maxQueueDelayMs;
+
+    /** Default queue limit for throttled traffic, in milliseconds. */
+    public static final long DEFAULT_MAX_QUEUE_DELAY_MS = 500L;
 
     private ThrottlePolicy(Map<AppType, Tier> tierByApp,
                            long essentialLimitKbps,
                            long standardLimitKbps,
-                           long entertainmentLimitKbps) {
+                           long entertainmentLimitKbps,
+                           long maxQueueDelayMs) {
         this.tierByApp              = tierByApp;
         this.essentialLimitKbps     = essentialLimitKbps;
         this.standardLimitKbps      = standardLimitKbps;
         this.entertainmentLimitKbps = entertainmentLimitKbps;
+        this.maxQueueDelayMs        = maxQueueDelayMs;
     }
 
     /**
@@ -88,6 +97,11 @@ public final class ThrottlePolicy {
         };
     }
 
+    /** Longest a throttled packet may wait before it is dropped, in microseconds. */
+    public long getMaxQueueDelayUsec() {
+        return maxQueueDelayMs * 1000L;
+    }
+
     // ── Factory methods ───────────────────────────────────────────────────────
 
     /**
@@ -98,6 +112,7 @@ public final class ThrottlePolicy {
         long essentialLimit     = -1L;
         long standardLimit      = 256L;
         long entertainmentLimit = 64L;
+        long maxQueueDelayMs    = DEFAULT_MAX_QUEUE_DELAY_MS;
 
         try {
             var lines = Files.readAllLines(Paths.get(filePath));
@@ -121,6 +136,15 @@ public final class ThrottlePolicy {
                     case "LIMIT_ESSENTIAL"     -> essentialLimit     = parseLong(value, lineNum);
                     case "LIMIT_STANDARD"      -> standardLimit      = parseLong(value, lineNum);
                     case "LIMIT_ENTERTAINMENT" -> entertainmentLimit = parseLong(value, lineNum);
+                    case "MAX_QUEUE_DELAY_MS"  -> {
+                        long ms = parseLong(value, lineNum);
+                        if (ms < 0) {
+                            FlowGateLogger.warn(COMPONENT, "Invalid MAX_QUEUE_DELAY_MS at line " + lineNum
+                                    + ", using " + DEFAULT_MAX_QUEUE_DELAY_MS + " ms");
+                            ms = DEFAULT_MAX_QUEUE_DELAY_MS;
+                        }
+                        maxQueueDelayMs = ms;
+                    }
                     default -> {
                         // Try to parse as AppType=Tier mapping
                         try {
@@ -139,10 +163,10 @@ public final class ThrottlePolicy {
             throw new ConfigurationException("Cannot read throttle-policy file: " + filePath, e);
         }
 
-        FlowGateLogger.info(COMPONENT, "Loaded. ESSENTIAL=-1, STANDARD=" + standardLimit
-                + " Kbps, ENTERTAINMENT=" + entertainmentLimit + " Kbps");
+        FlowGateLogger.info(COMPONENT, "Loaded. ESSENTIAL=" + essentialLimit + ", STANDARD=" + standardLimit
+                + " Kbps, ENTERTAINMENT=" + entertainmentLimit + " Kbps, MAX_QUEUE_DELAY=" + maxQueueDelayMs + " ms");
 
-        return new ThrottlePolicy(map, essentialLimit, standardLimit, entertainmentLimit);
+        return new ThrottlePolicy(map, essentialLimit, standardLimit, entertainmentLimit, maxQueueDelayMs);
     }
 
     /**
@@ -151,7 +175,7 @@ public final class ThrottlePolicy {
      */
     public static ThrottlePolicy defaults() {
         FlowGateLogger.info(COMPONENT, "Using built-in ASIT defaults.");
-        return new ThrottlePolicy(defaultTierMap(), -1L, 256L, 64L);
+        return new ThrottlePolicy(defaultTierMap(), -1L, 256L, 64L, DEFAULT_MAX_QUEUE_DELAY_MS);
     }
 
     // ── Private Helpers ───────────────────────────────────────────────────────

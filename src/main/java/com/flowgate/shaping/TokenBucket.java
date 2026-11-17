@@ -1,117 +1,134 @@
 package com.flowgate.shaping;
 
-import java.util.concurrent.atomic.AtomicLong;
-
 /**
- * A thread-safe Token Bucket rate limiter synchronized to PCAP timestamps.
- * Uses atomic CAS operations for concurrent access (not a formal lock-free proof).
+ * Token bucket traffic shaper that runs on PCAP time.
+ *
+ * <p>Picture a jar of byte-tokens. It refills at the configured speed and holds at most
+ * one second's worth. Every packet pays tokens equal to its size:
+ * <ul>
+ *   <li><b>Enough tokens:</b> the packet is sent now.</li>
+ *   <li><b>Not enough:</b> the packet still pays, so the balance goes below zero. The negative
+ *       balance is the bytes already waiting in the queue. The packet is delayed until the
+ *       bucket has earned that debt back.</li>
+ *   <li><b>Wait would be too long:</b> if the delay would exceed the queue limit, the packet is
+ *       dropped and its tokens are given back.</li>
+ * </ul>
+ * Because waiting packets pay up front, the output can never run faster than the configured
+ * speed, however fast packets arrive.
+ *
+ * <p><b>Not thread-safe.</b> {@link com.flowgate.quota.QuotaManager} evaluates one packet at a
+ * time in capture order, so a bucket is never used by two threads at once.
  */
 public final class TokenBucket {
 
-    /** Maximum burst size: 1 second of full-speed traffic at the configured rate. */
-    private static final long BURST_MULTIPLIER_USEC = 1_000_000L; // 1 second in microseconds
+    /** Default queue limit: a packet may be held for at most 500 ms. */
+    public static final long DEFAULT_MAX_DELAY_USEC = 500_000L;
 
-    private final long capacityBytes;  // Max tokens the bucket can hold (burst ceiling)
-    private final long bytesPerSecond; // For delay math
+    private static final long MICROS_PER_SECOND = 1_000_000L;
 
-    // Current token count in bytes (atomic for CAS operations)
-    private final AtomicLong tokens;
+    /** What happens to a packet. */
+    public enum Outcome { SEND_NOW, DELAY, QUEUE_FULL }
 
-    // PCAP timestamp of the last refill, in microseconds
-    private final AtomicLong lastRefillTsUsec;
+    /** Result for one packet: the outcome and, for {@link Outcome#DELAY}, how long to hold it. */
+    public record Result(Outcome outcome, long delayUsec) {
+        static final Result SEND = new Result(Outcome.SEND_NOW, 0L);
+        static final Result FULL = new Result(Outcome.QUEUE_FULL, 0L);
+    }
+
+    private final long bytesPerSecond;
+    private final long capacityBytes;
+    private final long maxDelayUsec;
+
+    // Tokens are stored in micro-bytes (bytes x 1,000,000), so refilling for a few
+    // microseconds never rounds down to zero. A negative value means bytes are queued.
+    private long microTokens;
+    private long lastRefillTsUsec;
+
+    /** Creates a full bucket with the default 500 ms queue limit. */
+    public TokenBucket(long bandwidthKbps, long initialTsUsec) {
+        this(bandwidthKbps, initialTsUsec, DEFAULT_MAX_DELAY_USEC);
+    }
 
     /**
-     * Creates a TokenBucket for the given bandwidth limit.
-     *
-     * @param bandwidthKbps  Target bandwidth in Kilobits per second (e.g. 64 for 64 Kbps)
-     * @param initialTsUsec  The PCAP timestamp (in microseconds) when this bucket is created.
+     * @param bandwidthKbps  speed limit in kilobits per second (e.g. 64)
+     * @param initialTsUsec  PCAP time, in microseconds, when the bucket is created
+     * @param maxDelayUsec   longest time a packet may wait before it is dropped instead
      */
-    public TokenBucket(long bandwidthKbps, long initialTsUsec) {
+    public TokenBucket(long bandwidthKbps, long initialTsUsec, long maxDelayUsec) {
         if (bandwidthKbps <= 0) {
             throw new IllegalArgumentException("Bandwidth limit must be > 0 Kbps");
         }
-        this.bytesPerSecond    = (bandwidthKbps * 1000L) / 8L; // Kbps → bytes/sec
-        this.capacityBytes     = bytesPerSecond;  // Burst = 1 full second of data
-        this.tokens            = new AtomicLong(capacityBytes); // Start full
-        this.lastRefillTsUsec  = new AtomicLong(initialTsUsec);
+        if (maxDelayUsec < 0) {
+            throw new IllegalArgumentException("Max delay cannot be negative");
+        }
+        this.bytesPerSecond   = (bandwidthKbps * 1000L) / 8L;   // Kbps -> bytes per second
+        this.capacityBytes    = bytesPerSecond;                  // burst = one second of traffic
+        this.maxDelayUsec     = maxDelayUsec;
+        this.microTokens      = capacityBytes * MICROS_PER_SECOND; // start full
+        this.lastRefillTsUsec = initialTsUsec;
     }
 
     /**
-     * Attempts to consume {@code packetBytes} tokens from the bucket.
-     * Refills the bucket first based on elapsed PCAP time.
+     * Decides what to do with one packet at the given PCAP time.
      *
-     * <p>Uses a CAS retry loop: read current state → compute new state → atomically swap.
-     *
-     * @param packetBytes    Size of the incoming packet in bytes
-     * @param currentTsUsec  Current PCAP timestamp in microseconds
-     * @return {@code true} if the packet fits within the budget (forward it),
-     *         {@code false} if the bucket is empty (delay or drop it)
+     * @param packetBytes    size of the packet in bytes
+     * @param currentTsUsec  PCAP timestamp of the packet in microseconds
      */
-    public boolean tryConsume(int packetBytes, long currentTsUsec) {
+    public Result admit(int packetBytes, long currentTsUsec) {
         if (packetBytes < 0) {
             throw new IllegalArgumentException("Packet size cannot be negative");
         }
-        if (packetBytes == 0) return true; // Empty packets (like TCP ACKs with no payload) are free
+        refill(currentTsUsec);
+        if (packetBytes == 0) {
+            return Result.SEND;
+        }
 
-        while (true) {
-            long lastRefill   = lastRefillTsUsec.get();
-            long currentTokens = tokens.get();
+        long cost = packetBytes * MICROS_PER_SECOND;
+        microTokens -= cost;                      // pay first, even if the packet has to wait
+        if (microTokens >= 0) {
+            return Result.SEND;
+        }
 
-            // Refill based on elapsed PCAP time
-            long elapsedUsec   = Math.max(0, currentTsUsec - lastRefill);
-            long tokensToAdd   = (elapsedUsec * bytesPerSecond) / BURST_MULTIPLIER_USEC;
-            long refilled      = Math.min(capacityBytes, currentTokens + tokensToAdd);
+        // Time for the bucket to earn the debt back: micro-bytes / (bytes per second) = microseconds.
+        long delayUsec = Math.ceilDiv(-microTokens, bytesPerSecond);
+        if (delayUsec > maxDelayUsec) {
+            microTokens += cost;                  // queue full: drop and give the tokens back
+            return Result.FULL;
+        }
+        return new Result(Outcome.DELAY, delayUsec);
+    }
 
-            // Check if packet fits in budget
-            long afterConsume  = refilled - packetBytes;
-            if (afterConsume < 0) {
-                // Not enough tokens — update timestamp without consuming
-                if (tokensToAdd > 0) {
-                    lastRefillTsUsec.compareAndSet(lastRefill, currentTsUsec);
-                    tokens.compareAndSet(currentTokens, refilled);
-                }
-                return false;
-            }
+    /** Adds the tokens earned since the last packet, never going above a full bucket. */
+    private void refill(long currentTsUsec) {
+        if (currentTsUsec <= lastRefillTsUsec) {
+            return;                               // same or earlier timestamp: no time has passed
+        }
+        long elapsedUsec = currentTsUsec - lastRefillTsUsec;
+        lastRefillTsUsec = currentTsUsec;
 
-            // Atomically commit state
-            if (lastRefillTsUsec.compareAndSet(lastRefill, currentTsUsec)) {
-                if (tokens.compareAndSet(currentTokens, afterConsume)) {
-                    return true; // Success
-                }
-                lastRefillTsUsec.set(lastRefill);
-            }
+        long full = capacityBytes * MICROS_PER_SECOND;
+        long missing = full - microTokens;
+        if (elapsedUsec >= Math.ceilDiv(missing, bytesPerSecond)) {
+            microTokens = full;                   // enough time passed to fill the bucket
+        } else {
+            microTokens += elapsedUsec * bytesPerSecond;
         }
     }
 
-    /**
-     * Calculates how many microseconds to add to the output PCAP timestamp
-     * to simulate this packet being delayed by the rate limiter.
-     * 
-     * Uses the token deficit to calculate exactly how long the packet must wait.
-     *
-     * @param packetBytes Size of the packet in bytes
-     * @return Simulated delay in microseconds
-     */
-    public long calculateDelayUsec(int packetBytes) {
-        long currentTokens = tokens.get();
-        long deficit = packetBytes - currentTokens;
-        
-        if (deficit <= 0) return 0; // No delay needed if we have enough tokens
-        
-        return (deficit * BURST_MULTIPLIER_USEC) / bytesPerSecond;
-    }
+    /** Current balance in bytes. Negative means that many bytes are waiting in the queue. */
+    public long getCurrentTokens() { return microTokens / MICROS_PER_SECOND; }
 
-    /** Returns the current token count (for diagnostics/dashboard). */
-    public long getCurrentTokens() { return tokens.get(); }
-
-    /** Returns the bucket capacity in bytes. */
+    /** Bucket size in bytes (one second of traffic). */
     public long getCapacityBytes() { return capacityBytes; }
 
-    /** Returns the configured rate in bytes per second. */
+    /** Configured speed in bytes per second. */
     public long getBytesPerSecond() { return bytesPerSecond; }
 
-    /** Returns fill percentage (0–100) for dashboard display. */
+    /** Longest time a packet may wait before it is dropped. */
+    public long getMaxDelayUsec() { return maxDelayUsec; }
+
+    /** Fill level from 0 to 100, for reports. 0 also covers a negative balance. */
     public int getFillPercent() {
-        return (int)((tokens.get() * 100L) / capacityBytes);
+        return (int) Math.max(0, (microTokens * 100L) / (capacityBytes * MICROS_PER_SECOND));
     }
 }
