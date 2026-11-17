@@ -12,7 +12,8 @@ import java.util.concurrent.atomic.AtomicLong;
  *
  * <p>DPI may run on multiple FastPath workers, but FUP accounting is applied in
  * PCAP/reader packet order via {@link #evaluateInOrder} so cumulative usage and
- * state transitions stay deterministic.
+ * state transitions stay deterministic. Because only one packet is evaluated at a
+ * time, the token buckets used here never see two threads at once.
  */
 public final class QuotaManager {
 
@@ -143,22 +144,23 @@ public final class QuotaManager {
                     "Tier has no bandwidth limit", pcapTsSec);
         }
 
-        // Apply Token Bucket Rate Limiting
+        // Shape the traffic with a token bucket (one per subscriber and tier).
         String bucketKey = ipInt + "_" + tier.name();
-        TokenBucket bucket = buckets.computeIfAbsent(bucketKey, 
-                k -> new TokenBucket(bandwidthKbps, pcapTsUsec));
+        TokenBucket bucket = buckets.computeIfAbsent(bucketKey,
+                k -> new TokenBucket(bandwidthKbps, pcapTsUsec, throttlePolicy.getMaxQueueDelayUsec()));
 
-        if (bucket.tryConsume(packetBytes, pcapTsUsec)) {
-            return PolicyDecision.forward(ipInt, plan.getName(), appType, tier, currentUsage, 
-                    plan.getDailyQuotaBytes(), usagePct, state, ReasonCode.FUP_QUOTA_EXCEEDED, 
-                    "Throttled but tokens available", pcapTsSec);
-        } else {
-            // Bucket empty! Packet must be delayed.
-            long delayUsec = bucket.calculateDelayUsec(packetBytes);
-            return PolicyDecision.delay(ipInt, plan.getName(), appType, tier, currentUsage, 
-                    plan.getDailyQuotaBytes(), usagePct, state, bandwidthKbps, delayUsec, 
-                    ReasonCode.FUP_QUOTA_EXCEEDED, "Delayed by ASIT Token Bucket", pcapTsSec);
-        }
+        TokenBucket.Result shaped = bucket.admit(packetBytes, pcapTsUsec);
+        return switch (shaped.outcome()) {
+            case SEND_NOW -> PolicyDecision.forward(ipInt, plan.getName(), appType, tier, currentUsage,
+                    plan.getDailyQuotaBytes(), usagePct, state, ReasonCode.FUP_QUOTA_EXCEEDED,
+                    "Throttled, but within the " + bandwidthKbps + " Kbps limit", pcapTsSec);
+            case DELAY -> PolicyDecision.delay(ipInt, plan.getName(), appType, tier, currentUsage,
+                    plan.getDailyQuotaBytes(), usagePct, state, bandwidthKbps, shaped.delayUsec(),
+                    ReasonCode.FUP_QUOTA_EXCEEDED, "Delayed to stay within " + bandwidthKbps + " Kbps", pcapTsSec);
+            case QUEUE_FULL -> PolicyDecision.throttleDrop(ipInt, plan.getName(), appType, tier, currentUsage,
+                    plan.getDailyQuotaBytes(), usagePct, bandwidthKbps,
+                    "Dropped: would wait longer than the throttle queue allows", pcapTsSec);
+        };
     }
 
     private FupState calculateFupState(long usage, Plan plan) {

@@ -21,4 +21,5 @@ public class DPIStats {
     // FlowGate policy counters
     public final AtomicLong throttledPackets  = new AtomicLong(0); // DELAY verdict (token bucket active)
     public final AtomicLong hardDroppedPackets = new AtomicLong(0); // DROP by quota hard limit
+    public final AtomicLong throttleQueueDrops = new AtomicLong(0); // DROP because the throttle queue was full
 }

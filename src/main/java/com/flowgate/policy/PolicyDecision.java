@@ -57,6 +57,19 @@ public record PolicyDecision(
                 FupState.HARD_DROP, -1L, PolicyVerdict.DROP, reason, explanation, 0L, pcapTs);
     }
 
+    /**
+     * Convenience factory: drop while throttled, because the throttle queue is full.
+     * The subscriber is still in the THROTTLE state, not HARD_DROP.
+     */
+    public static PolicyDecision throttleDrop(int ip, String plan, AppType app,
+                                              ThrottlePolicy.Tier tier, long usage,
+                                              long quota, double pct, long bandwidthKbps,
+                                              String explanation, long pcapTs) {
+        return new PolicyDecision(ip, plan, app, tier, usage, quota, pct,
+                FupState.THROTTLE, bandwidthKbps, PolicyVerdict.DROP,
+                ReasonCode.THROTTLE_QUEUE_FULL, explanation, 0L, pcapTs);
+    }
+
     /** Formats usage as "1.2 GB / 1.5 GB (80.0%)" for display. */
     public String usageSummary() {
         String usedStr  = formatBytes(usageBytes);

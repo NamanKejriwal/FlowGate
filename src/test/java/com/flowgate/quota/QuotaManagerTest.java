@@ -199,6 +199,24 @@ class QuotaManagerTest {
         }
     }
 
+    @Test
+    void throttled_packet_is_dropped_when_the_queue_is_full() {
+        int ip = ipToInt(192, 168, 1, 22); // Basic
+        manager.injectUsage(ip, (long) (1.6 * ONE_GB)); // THROTTLE state
+
+        // YOUTUBE is ENTERTAINMENT: 64 Kbps = 8,000 bytes/s, queue limit 500 ms
+        assertEquals(PolicyVerdict.FORWARD, manager.evaluate(ip, AppType.YOUTUBE, 8000, 1000L).verdict());
+        PolicyDecision waits = manager.evaluate(ip, AppType.YOUTUBE, 4000, 1000L);
+        assertEquals(PolicyVerdict.DELAY, waits.verdict());
+        assertEquals(500_000L, waits.simulatedDelayUsec());
+
+        PolicyDecision dropped = manager.evaluate(ip, AppType.YOUTUBE, 1000, 1000L);
+        assertEquals(PolicyVerdict.DROP, dropped.verdict());
+        assertEquals(ReasonCode.THROTTLE_QUEUE_FULL, dropped.reasonCode());
+        assertEquals(FupState.THROTTLE, dropped.fupState()); // still throttled, not hard-dropped
+        assertEquals(64L, dropped.bandwidthLimitKbps());
+    }
+
     // ── Helper ───────────────────────────────────────────────────────────────
     
     // Little Endian to match x86 memcpy

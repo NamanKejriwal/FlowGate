@@ -5,6 +5,10 @@ LIMIT_ESSENTIAL=-1
 LIMIT_STANDARD=256
 LIMIT_ENTERTAINMENT=64
 
+# Longest a throttled packet may wait in the queue. Anything that would
+# wait longer is dropped instead (like a full buffer on a real link).
+MAX_QUEUE_DELAY_MS=500
+
 # ---------------------------------------------------------------
 # App → Tier mappings
 # ESSENTIAL: Always full speed (protected during FUP throttling)

@@ -11,6 +11,11 @@ LIMIT_ESSENTIAL=-1
 LIMIT_STANDARD=2
 LIMIT_ENTERTAINMENT=1
 
+# At 1-2 Kbps a 600-byte demo packet needs 1.4-3.8 s to get through.
+# A longer queue limit lets the demo show those packets as DELAY instead of DROP.
+# (Real setting: config/throttle-policy.txt uses the 500 ms default.)
+MAX_QUEUE_DELAY_MS=5000
+
 # App Mappings
 WHATSAPP=ESSENTIAL
 GPAY=ESSENTIAL

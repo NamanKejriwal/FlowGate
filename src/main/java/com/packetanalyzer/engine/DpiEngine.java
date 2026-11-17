@@ -3,6 +3,7 @@ package com.packetanalyzer.engine;
 import com.flowgate.diagnostics.ConnectionHealthAnalyzer;
 import com.flowgate.diagnostics.ConnectionHealthAnalyzer.DiagnosticReport;
 import com.flowgate.policy.PolicyDecision;
+import com.flowgate.policy.ReasonCode;
 import com.flowgate.policy.ThrottlePolicy;
 import com.flowgate.quota.QuotaManager;
 import com.flowgate.quota.SubscriberRegistry;
@@ -362,9 +363,14 @@ public class DpiEngine {
         }
 
         if (action == PacketAction.DROP) {
-            // Check if this was a FlowGate hard-drop vs a rule-based drop
+            // A FlowGate drop is either the 2x-quota hard limit or a full throttle queue.
+            // (No policy decision means a firewall rule dropped it.)
             if (job.policyDecision != null) {
-                stats.hardDroppedPackets.incrementAndGet();
+                if (job.policyDecision.reasonCode() == ReasonCode.THROTTLE_QUEUE_FULL) {
+                    stats.throttleQueueDrops.incrementAndGet();
+                } else {
+                    stats.hardDroppedPackets.incrementAndGet();
+                }
                 collectDecision(job.policyDecision);
             }
             stats.droppedPackets.incrementAndGet();
@@ -623,7 +629,8 @@ public class DpiEngine {
         ss.append("----------------------------------------------------------------\n");
         ss.append(String.format("  FORWARD         : %d%n", stats.forwardedPackets.get()));
         ss.append(String.format("  DELAY           : %d%n", stats.throttledPackets.get()));
-        ss.append(String.format("  DROP            : %d%n", stats.hardDroppedPackets.get()));
+        ss.append(String.format("  DROP (2x quota) : %d%n", stats.hardDroppedPackets.get()));
+        ss.append(String.format("  DROP (queue full): %d%n", stats.throttleQueueDrops.get()));
         ss.append(String.format("  Packet Drop Rate: %.2f%%%n%n", dropRate));
 
 

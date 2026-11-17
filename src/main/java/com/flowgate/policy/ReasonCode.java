@@ -19,6 +19,12 @@ public enum ReasonCode {
     HARD_DROP_THRESHOLD,
 
     /**
+     * Subscriber is throttled and the packet would have to wait longer than the
+     * throttle queue allows, so it is dropped instead of delayed.
+     */
+    THROTTLE_QUEUE_FULL,
+
+    /**
      * The application is in the ESSENTIAL tier (e.g. WhatsApp, DNS).
      * Even if the subscriber is throttled, this traffic is protected at full speed.
      */
