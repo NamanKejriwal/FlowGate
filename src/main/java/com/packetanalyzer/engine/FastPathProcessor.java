@@ -139,14 +139,13 @@ public class FastPathProcessor implements Runnable {
                     // Step 2: FlowGate — evaluate quota in PCAP packet order (DPI stays concurrent)
                     long pcapTsUsec = job.tsSec * 1_000_000L + job.tsUsec;
 
-                    // Look up the appType the DPI engine just classified (may be UNKNOWN)
-                    Connection tracked = connTracker.getOrCreateConnection(job.tuple, job.tsSec);
-                    com.packetanalyzer.types.AppType appType = (tracked != null)
-                            ? tracked.appType
-                            : com.packetanalyzer.types.AppType.UNKNOWN;
+                    // Which app is this, and which end is our subscriber?
+                    // Downloads (server -> subscriber) are billed to the destination.
+                    AppType appType = appTypeOf(job.tuple);
+                    int subscriberIp = quotaManager.subscriberIpOf(job.tuple.srcIp, job.tuple.dstIp);
 
                     PolicyDecision decision = quotaManager.evaluateInOrder(
-                            job.packetId, job.tuple.srcIp, appType, job.data.length, pcapTsUsec);
+                            job.packetId, subscriberIp, appType, job.data.length, pcapTsUsec);
 
                     job.policyDecision = decision;
 
@@ -177,6 +176,23 @@ public class FastPathProcessor implements Runnable {
                 Thread.currentThread().interrupt();
             }
         }
+    }
+
+    /**
+     * The app for this packet's connection. A reply (e.g. server -> subscriber) usually carries
+     * no hostname, so it takes the app found on the request going the other way. Both directions
+     * reach this same worker because the load balancers use {@link FiveTuple#flowHash()}.
+     */
+    private AppType appTypeOf(FiveTuple tuple) {
+        Connection conn = connTracker.getConnection(tuple);
+        if (conn != null && conn.appType != AppType.UNKNOWN) {
+            return conn.appType;
+        }
+        Connection request = connTracker.getConnection(tuple.reverse());
+        if (request != null && request.appType != AppType.UNKNOWN) {
+            return request.appType;
+        }
+        return AppType.UNKNOWN;
     }
 
     private RuleManager.BlockReason processPacket(PacketJob job) {

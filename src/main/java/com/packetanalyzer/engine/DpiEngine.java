@@ -25,6 +25,7 @@ import com.packetanalyzer.analytics.AnalyticsManager;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
@@ -301,7 +302,8 @@ public class DpiEngine {
     }
 
     private int selectLB(FiveTuple tuple) {
-        long hash = tuple.hashCode() & 0xFFFFFFFFL;
+        // Same value for both directions, so a reply goes where its request went
+        long hash = tuple.flowHash() & 0xFFFFFFFFL;
         return (int) (hash % loadBalancers.size());
     }
 
@@ -423,6 +425,17 @@ public class DpiEngine {
      * Records a PolicyDecision in the per-IP ring buffer (max {@value #MAX_DECISIONS_PER_IP} entries).
      * Thread-safe because the inner list is synchronised on itself.
      */
+    /** Recent policy decisions per billed subscriber IP (a copy, for reports and tests). */
+    public Map<Integer, List<PolicyDecision>> getRecentDecisions() {
+        Map<Integer, List<PolicyDecision>> copy = new HashMap<>();
+        decisionsByIp.forEach((ip, list) -> {
+            synchronized (list) {
+                copy.put(ip, List.copyOf(list));
+            }
+        });
+        return copy;
+    }
+
     private void collectDecision(PolicyDecision decision) {
         List<PolicyDecision> list = decisionsByIp.computeIfAbsent(
                 decision.subscriberIp(), k -> Collections.synchronizedList(new ArrayList<>()));

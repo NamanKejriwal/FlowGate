@@ -217,6 +217,17 @@ class QuotaManagerTest {
         assertEquals(64L, dropped.bandwidthLimitKbps());
     }
 
+    @Test
+    void uploads_and_downloads_are_billed_to_the_subscriber() {
+        int subscriber = ipToInt(192, 168, 1, 22); // listed in subscribers.txt
+        int server     = ipToInt(142, 250, 190, 46);
+        int stranger   = ipToInt(10, 0, 0, 7);
+
+        assertEquals(subscriber, manager.subscriberIpOf(subscriber, server)); // upload
+        assertEquals(subscriber, manager.subscriberIpOf(server, subscriber)); // download
+        assertEquals(stranger, manager.subscriberIpOf(stranger, server));     // neither listed: source
+    }
+
     // ── Helper ───────────────────────────────────────────────────────────────
     
     // Little Endian to match x86 memcpy

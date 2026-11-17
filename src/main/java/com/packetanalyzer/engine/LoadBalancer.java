@@ -100,8 +100,9 @@ public class LoadBalancer implements Runnable {
     }
 
     private int selectFP(FiveTuple tuple) {
-        // We ensure hash is positive
-        long hash = tuple.hashCode() & 0xFFFFFFFFL;
+        // Same value for both directions, so a reply goes to the worker that saw its request.
+        // Masking keeps the hash positive.
+        long hash = tuple.flowHash() & 0xFFFFFFFFL;
         return (int) (hash % numFps);
     }
 }

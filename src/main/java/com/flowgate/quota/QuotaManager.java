@@ -163,6 +163,17 @@ public final class QuotaManager {
         };
     }
 
+    /**
+     * Picks which end of a packet is the subscriber to bill.
+     * Uploads come from the subscriber (source); downloads go to the subscriber (destination).
+     * If neither end is a registered subscriber, the source is billed under the default plan.
+     */
+    public int subscriberIpOf(int srcIp, int dstIp) {
+        if (registry.isSubscriber(srcIp)) return srcIp;
+        if (registry.isSubscriber(dstIp)) return dstIp;
+        return srcIp;
+    }
+
     private FupState calculateFupState(long usage, Plan plan) {
         if (plan.isUnlimited()) return FupState.NORMAL;
         if (plan.getHardDropThresholdBytes() > 0 && usage >= plan.getHardDropThresholdBytes()) {
